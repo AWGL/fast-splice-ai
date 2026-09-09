@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from fastspliceai import SpliceAI  # noqa: E402
+from fastspliceai import SpliceAI 
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s pid%(process)d] %(message)s",
                     datefmt="%H:%M:%S", stream=sys.stderr)

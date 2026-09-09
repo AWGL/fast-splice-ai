@@ -18,12 +18,13 @@ cd fast-splice-ai
 pip install -r requirements.txt
 
 python examples/grch38_example.py \
-    /path/to/hg38.fa \
+    /data/resources/reference_genomes/GRCh38_full_analysis_set_plus_decoy_hla_masked.fa \
     data/mane_v1.5/annotation.txt.gz \
     data/mane_v1.5/genepred.txt.gz \
-    /path/to/spliceai/models
-```
+    ../spliceai/models
 
+```
+Note ../spliceai/models is here https://github.com/Illumina/SpliceAI/tree/master/spliceai/models
 ```
 === SpliceAI delta scores ===
   gene                   #CHROM       POS REF ALT  DS_AG  DS_AL  DS_DG  DS_DL
@@ -46,8 +47,7 @@ pip install "git+https://github.com/AWGL/fast-splice-ai.git"
 
 ### Development
 
-Install the dependencies only — the package itself stays where you are editing
-it, uninstalled:
+Install the dependencies only
 
 ```sh
 git clone https://github.com/AWGL/fast-splice-ai.git
@@ -195,6 +195,30 @@ aberration calls. Build the object once and reuse it. Full reference in
 | `-D` distance | **500** | 12% slower than 50, sees ten times as much sequence. Upstream SpliceAI uses 50; precomputed score files are 50-only, which is a real source of missed variants. |
 | threads | **half the CPU allocation, minimum 4** | This is expected to share a host. Detection respects cgroups, `cpuset`, SLURM and `OMP_NUM_THREADS`, so a container limited to 2 CPUs uses 2, not the host's 64. |
 | processes (`-j`) | **1** | The five models already run concurrently across all cores in one process. |
+
+### SAI-10k-calc thresholds
+
+Match the R implementation except where noted. Override with
+`SpliceAI(thresholds={"DS_ALDL_MIN_T": 0.1})`, `Thresholds.strict()`, or the
+`--DS_*` flags on `fastspliceai-sai10k`.
+
+| | default | |
+|---|---|---|
+| `AG_T` / `DG_T` | 0.2 | acceptor / donor gain needed for cryptic activation |
+| `AGDG_T` | 0.0 | floor on the larger of the two gains |
+| `DS_GL_T` | -0.2 | gain-minus-loss margin |
+| `DS_AGDG_MIN_T` / `_MAX_T` | 0.02 / 0.2 | both gains, for a predicted gained exon |
+| `DS_ALDL_MIN_T` / `_MAX_T` | **0.05** / 0.2 | both losses, for exon skipping and intron retention |
+| `GEX_size_MIN` / `_MAX` | 25 / 500 bp | plausible pseudoexon size |
+
+**`DS_ALDL_MIN_T` is the one that differs** — SAI-10k-calc uses 0.02, which lets
+a 0.05 acceptor-loss score (noise) help support an intron-retention call. Pass
+`Thresholds(DS_ALDL_MIN_T=0.02)` to reproduce the R tool exactly, or
+`Thresholds.strict()` to raise `AGDG_T`, `DS_AGDG_MIN_T` and `DS_ALDL_MIN_T` to
+0.1.
+
+Every call carries `Event_confidence` and `Confidence_note` with the limiting
+score, so a marginal call stays visible whatever the thresholds.
 
 ## Testing
 
