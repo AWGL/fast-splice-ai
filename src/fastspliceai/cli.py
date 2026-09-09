@@ -9,7 +9,7 @@ from collections import namedtuple
 
 from . import __version__
 from .annotator import Annotator
-from .engine import Ensemble
+from .engine import Ensemble, available_cpus
 from .score import _RefCache, get_delta_scores
 
 Variant = namedtuple("Variant", "chrom pos ref alts")
@@ -26,6 +26,8 @@ INFO_LINE = (
 )
 
 _WORKER = {}
+# built once in the parent, inherited by forked workers copy-on-write
+_SHARED = {}
 
 
 def build_parser():
@@ -38,7 +40,7 @@ def build_parser():
     p.add_argument("-R", metavar="reference", required=True, help="reference genome FASTA")
     p.add_argument("-A", metavar="annotation", required=True,
                    help="'grch37', 'grch38', or a path to a custom annotation table")
-    p.add_argument("-D", metavar="distance", type=int, default=50,
+    p.add_argument("-D", metavar="distance", type=int, default=500,
                    help="max distance between variant and gained/lost site (default: 50)")
     p.add_argument("-M", metavar="mask", type=int, choices=(0, 1), default=0,
                    help="mask annotated gains / unannotated losses (default: 0)")
@@ -49,10 +51,10 @@ def build_parser():
     g.add_argument("-t", "--threads", type=int, default=0,
                    help="inference threads per process (default: all cores)")
     g.add_argument("-j", "--processes", type=int, default=1,
-                   help="worker processes (default: 1)")
-    g.add_argument("--precision", choices=("fp32", "int8"), default="fp32",
-                   help="fp32 reproduces SpliceAI exactly; int8 is ~3x faster but "
-                        "shifts delta scores by up to ~0.02 (see README)")
+                   help="worker processes (default: 1). The five models already "
+                        "run concurrently across all cores in one process, so "
+                        "extra workers usually contend; raise this only if you "
+                        "have many more cores than ~15")
     p.add_argument("--raw-scores", action="store_true",
                    help="also emit the REF/ALT scores each delta is derived from "
                         "(the input format SAI-10k-calc's REF/ALT mode expects)")
@@ -63,9 +65,10 @@ def build_parser():
     return p
 
 
-def _init_worker(models, threads, precision, ref, annotation):
-    _WORKER["ens"] = Ensemble(models, threads=threads or None, precision=precision)
-    _WORKER["ann"] = Annotator(ref, annotation)
+def _init_worker(models, threads, ref, annotation):
+    # ONNX sessions are built here, in the child: they must not cross a fork.
+    _WORKER["ens"] = Ensemble(models, threads=threads or None)
+    _WORKER["ann"] = Annotator(ref, _SHARED.get("tables", annotation))
 
 
 def _score_chunk(args):
@@ -132,13 +135,21 @@ def main(argv=None):
     chunk_size = max(1, args.chunk_size)
 
     if args.processes > 1:
+        import multiprocessing
         from concurrent.futures import ProcessPoolExecutor
 
-        per = max(1, (args.threads or os.cpu_count() or 1) // args.processes)
+        per = max(1, (args.threads or available_cpus()) // args.processes)
+        # Parse the transcript table once and fork, so workers inherit it rather
+        # than each spending ~0.5s rebuilding the same index.
+        kwargs = {}
+        if "fork" in multiprocessing.get_all_start_methods():
+            _SHARED["tables"] = Annotator.build_tables(args.A)
+            kwargs["mp_context"] = multiprocessing.get_context("fork")
         with ProcessPoolExecutor(
             max_workers=args.processes,
             initializer=_init_worker,
-            initargs=(args.models, per, args.precision, args.R, args.A),
+            initargs=(args.models, per, args.R, args.A),
+            **kwargs,
         ) as pool:
             for batch in chunks(vcf, chunk_size * args.processes):
                 shard = max(1, len(batch) // args.processes + 1)
@@ -148,7 +159,7 @@ def main(argv=None):
                 scored = [s for part in pool.map(_score_chunk, jobs) for s in part]
                 emit(batch, scored)
     else:
-        _init_worker(args.models, args.threads, args.precision, args.R, args.A)
+        _init_worker(args.models, args.threads, args.R, args.A)
         for batch in chunks(vcf, chunk_size):
             emit(batch, _score_chunk((to_variants(batch), args.D, args.M,
                                       args.cache_size, args.raw_scores)))

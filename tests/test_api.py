@@ -166,3 +166,30 @@ def test_four_variants_are_not_mistaken_for_one(sai):
     df = sai.score(["chr10-94077-A-C", "chr10-94555-C-T",
                     "chr10-94077-A-G", "chr10-94077-A-T"], sai10k=False)
     assert len(df) == 4
+
+
+def test_tile_matches_windowed_scoring(sai):
+    """Ensemble.tile() is public and documented; assert it agrees with predict()."""
+    import numpy as np
+
+    from fastspliceai.engine import CONTEXT
+
+    rng = np.random.default_rng(0)
+    L = CONTEXT + 4000
+    x = np.zeros((4, L), np.float32)
+    x[rng.integers(0, 4, L), np.arange(L)] = 1
+    whole = sai.ensemble.predict(x[None])[0]
+    tiled = sai.ensemble.tile(x, tile=1500)             # forces several tiles
+    assert tiled.shape == whole.shape
+    assert np.abs(tiled - whole).max() < 1e-5
+
+
+def test_score_variants_one_shot(tables):
+    """The convenience wrapper is exported and documented; make sure it runs."""
+    from fastspliceai import score_variants
+
+    ann, gp = tables
+    df = score_variants(["chr10-94077-A-C"], reference=ROOT / "tests" / "data" / "test.fa",
+                        annotation=ann, transcripts=gp,
+                        models=ROOT / "spliceai" / "models", distance=500)
+    assert len(df) == 1 and df.iloc[0]["ALT"] == "C"

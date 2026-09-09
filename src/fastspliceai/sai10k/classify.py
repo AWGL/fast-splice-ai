@@ -14,7 +14,6 @@ need the reference genome and translation.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,7 +27,20 @@ REFALT_FIELDS = ["DS_AG_REF", "DS_AG_ALT", "DS_AL_REF", "DS_AL_ALT",
 
 @dataclass
 class Thresholds:
-    """Defaults match SAI-10k-calc's optparse defaults."""
+    """Defaults match SAI-10k-calc's optparse defaults exactly.
+
+    ONE EXCEPTION: DS_ALDL_MIN_T defaults to 0.05 here, where SAI-10k-calc uses
+    0.02. At 0.02 an acceptor-loss score of 0.05 - noise - is enough to help
+    support an intron-retention call, which produced a visibly spurious call on
+    CDKN2A. Pass Thresholds(DS_ALDL_MIN_T=0.02) to reproduce the R tool exactly.
+
+    Override individually, or take a tighter set wholesale:
+
+        SpliceAI(..., thresholds={"DS_ALDL_MIN_T": 0.1})
+        SpliceAI(..., thresholds=Thresholds.strict())
+    """
+
+    R_DEFAULT_DS_ALDL_MIN_T = 0.02
     GEX_size_MIN: float = 25
     GEX_size_MAX: float = 500
     AG_T: float = 0.2
@@ -37,8 +49,27 @@ class Thresholds:
     DS_GL_T: float = -0.2
     DS_AGDG_MIN_T: float = 0.02
     DS_AGDG_MAX_T: float = 0.2
-    DS_ALDL_MIN_T: float = 0.02
+    DS_ALDL_MIN_T: float = 0.05          # SAI-10k-calc uses 0.02; see note below
     DS_ALDL_MAX_T: float = 0.2
+
+    @classmethod
+    def strict(cls, **overrides):
+        """Tighter floors: every supporting score must be a real signal, not noise."""
+        base = dict(DS_AGDG_MIN_T=0.1, DS_ALDL_MIN_T=0.1, AGDG_T=0.1)
+        base.update(overrides)
+        return cls(**base)
+
+    @classmethod
+    def make(cls, value):
+        """Accept a Thresholds, a dict of overrides, or None."""
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        unknown = set(value) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ValueError("unknown thresholds: {}".format(sorted(unknown)))
+        return cls(**value)
 
 
 def parse_spliceai_vcf(path):
@@ -73,13 +104,24 @@ def parse_spliceai_vcf(path):
 
 
 def _closest_exon(variants, exons):
-    """Join each variant to the exon of its transcript that lies closest."""
-    key = "SYMBOL" if variants["SYMBOL"].iloc[0].startswith("RefSeqTx-") else "Gene"
-    ex = exons.copy()
-    ex["SYMBOL"] = ("RefSeqTx-" + ex["name"]) if key == "SYMBOL" else ex["Gene"]
-    ex["chrom_nochr"] = ex["chrom"].str.replace("^chr", "", regex=True)
+    """Join each variant to the exon of its transcript that lies closest.
+
+    The join keys are precomputed by build_exon_table(), and the exon table is
+    narrowed to the transcripts these variants actually touch before merging, so
+    the cost tracks the number of variants rather than the size of the table.
+    Nothing is cached on the frame: pandas deep-copies .attrs on every derived
+    operation, so a large object parked there is copied once per groupby group.
+    """
+    col = ("SYMBOL_refseq" if variants["SYMBOL"].iloc[0].startswith("RefSeqTx-")
+           else "SYMBOL_gene")
     v = variants.copy()
     v["chrom_nochr"] = v["#CHROM"].astype(str).str.replace("^chr", "", regex=True)
+
+    wanted = set(v["chrom_nochr"] + "\x00" + v["SYMBOL"])
+    keys = exons["chrom_nochr"] + "\x00" + exons[col]
+    ex = exons[keys.isin(wanted)].copy()
+    ex["SYMBOL"] = ex[col]
+
     m = v.merge(ex, left_on=["chrom_nochr", "SYMBOL"], right_on=["chrom_nochr", "SYMBOL"],
                 how="left", suffixes=("", "_ex"))
     m = m[m["name"].notna()].copy()
@@ -134,8 +176,8 @@ def _find_exons_lost_gain(row, by_tx, dl_dg, al_ag):
 
 
 def classify(variants, exons, t=None):
-    """Return the SAI-10k-calc prediction table (without the *_aaseq columns)."""
-    t = t or Thresholds()
+    """Return the SAI-10k-calc prediction table."""
+    t = Thresholds.make(t)
     d = _closest_exon(variants, exons)
     if d.empty:
         return d
@@ -217,7 +259,8 @@ def classify(variants, exons, t=None):
         [d["GEO_DG"] - d["eEnd"], (d["eStart"] + 1) - d["GEO_DG"]], default=0)
 
     # --- per-transcript lookups (only where the predicate fires) ----------
-    by_tx = {n: g for n, g in exons.groupby("name")}
+    needed = set(d["name"].unique())
+    by_tx = {n: g for n, g in exons[exons["name"].isin(needed)].groupby("name")}
     need_pe = (d["d_50bp"] == "YES") & (d["GEX_predict"] == "PASS") & d["Gained_exon_size"].notna()
     pe = d[need_pe].apply(lambda r: _find_pseudoexon_intron(r, by_tx), axis=1) if need_pe.any() else pd.Series(dtype=object)
     d["Pseudoexon_intron"] = pd.Series([None] * len(d), index=d.index, dtype=object)
@@ -291,6 +334,35 @@ def classify(variants, exons, t=None):
         d.loc[ie, "Exon_with_increased_inclusion"] = [x[0] for x in res]
 
     d["Used_RefSeq_Transcript"] = d["name"]
+
+    # How well supported is each call? The limiting delta score, plus whether
+    # the event could be tied to a named intron or exon. An intron-retention
+    # call that cannot name an intron is unanchored and should be treated with
+    # suspicion, however high the donor-loss score.
+    conf, why = [], []
+    for _, r in d.iterrows():
+        limits, notes = [], []
+        if r["Intron_retention"] == "YES" or r["Exon_skipping"] == "YES":
+            limits.append(float(r["DS_ALDL_MIN"]))
+            if r["Intron_retention"] == "YES" and pd.isna(r["Retained_intron"]):
+                notes.append("intron not identified")
+            if r["Exon_skipping"] == "YES" and not r["Lost_exons"]:
+                notes.append("exons not identified")
+        if r["Pseudoexon_activation"] == "YES" or r["Increased_exon_inclusion"] == "YES":
+            limits.append(float(r["DS_AGDG_MIN"]))
+        if r["Partial_exon_deletion"] == "YES" or r["Partial_intron_retention"] == "YES":
+            limits.append(float(max(r["DS_AG"], r["DS_DG"])))
+        if not limits:
+            conf.append(None); why.append(None); continue
+        lim = min(limits)
+        label = "high" if lim >= 0.5 else "moderate" if lim >= 0.2 else "low"
+        if notes:
+            label = "low"
+        notes.insert(0, "limiting score {:.2f}".format(lim))
+        conf.append(label); why.append("; ".join(notes))
+    d["Event_confidence"] = conf
+    d["Confidence_note"] = why
+
     d["Consequence"] = d.apply(_consequence, axis=1)
     return d
 
@@ -346,4 +418,9 @@ def _consequence(r):
         e = r.get("Exon_with_increased_inclusion")
         out.append("Increased inclusion of {}".format(_plural("exon", e)) if e
                    else "Increased exon inclusion")
-    return "; ".join(out) if out else "No splicing aberration predicted"
+    if not out:
+        return "No splicing aberration predicted"
+    text = "; ".join(out)
+    if r.get("Event_confidence") == "low":
+        text += " [low confidence: {}]".format(r.get("Confidence_note") or "")
+    return text

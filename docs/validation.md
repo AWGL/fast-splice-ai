@@ -27,6 +27,22 @@ The GRCh38 set is the important one: it covers plus- and minus-strand
 transcripts across real loci, which a single-gene test FASTA cannot. Together
 that is 726 comparisons with no differences.
 
+
+## Beyond golden files
+
+Golden files only catch changes to the rows they contain. `tests/test_invariants.py`
+adds assertions about behaviour that must hold whatever the implementation does:
+
+* variants whose biology is not in doubt — canonical `GT` donor disruptions and
+  published pseudoexon-activating deep intronic variants — must keep scoring
+  above a floor;
+* `DS_XX` must equal its own ALT/REF pair, so the two outputs cannot drift;
+* results must not depend on how the work is sharded across processes.
+
+This layer was added after a regression the golden files missed entirely: an
+INT8 path calibrated on random sequence turned every strong call into noise
+while the suite stayed green. INT8 has since been removed; the tests remain.
+
 ---
 
 *Part of the [FastSpliceAI](../README.md) documentation.*

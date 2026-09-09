@@ -1,9 +1,13 @@
 """Gene annotation table and reference genome access."""
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 import numpy as np
+
+log = logging.getLogger("fastspliceai.annotator")
 
 BUNDLED = {"grch37": "grch37.txt", "grch38": "grch38.txt"}
 
@@ -26,9 +30,16 @@ class Annotator:
     is a binary search over one chromosome instead of a full table scan.
     """
 
-    def __init__(self, ref_fasta, annotations):
+    @staticmethod
+    def build_tables(annotations):
+        """Everything derived from the transcript table, without touching a FASTA.
+
+        Split out so a parent process can build it once and forked workers can
+        inherit it copy-on-write instead of each rebuilding the index.
+        """
         import pandas as pd
-        from pyfaidx import Fasta
+
+        _t0 = time.perf_counter()
 
         if isinstance(annotations, pd.DataFrame):
             df = annotations.copy()
@@ -42,12 +53,13 @@ class Annotator:
         if missing:
             raise ValueError("annotation file is missing columns: {}".format(sorted(missing)))
 
-        self.genes = df["#NAME"].to_numpy()
-        self.chroms = df["CHROM"].to_numpy()
-        self.strands = df["STRAND"].to_numpy()
-        self.tx_starts = df["TX_START"].to_numpy() + 1
-        self.tx_ends = df["TX_END"].to_numpy()
-        self.exon_bounds = [
+        t = {}
+        t["genes"] = df["#NAME"].to_numpy()
+        t["chroms"] = df["CHROM"].to_numpy()
+        t["strands"] = df["STRAND"].to_numpy()
+        t["tx_starts"] = df["TX_START"].to_numpy() + 1
+        t["tx_ends"] = df["TX_END"].to_numpy()
+        t["exon_bounds"] = [
             np.union1d(
                 np.asarray([int(i) for i in s.split(",") if i], np.int64) + 1,
                 np.asarray([int(i) for i in e.split(",") if i], np.int64),
@@ -56,14 +68,30 @@ class Annotator:
         ]
 
         # per-chromosome index, sorted by transcript start
-        self._index = {}
-        for chrom in np.unique(self.chroms):
-            idx = np.nonzero(self.chroms == chrom)[0]
-            idx = idx[np.argsort(self.tx_starts[idx], kind="stable")]
-            self._index[chrom] = (idx, self.tx_starts[idx])
+        index = {}
+        for chrom in np.unique(t["chroms"]):
+            idx = np.nonzero(t["chroms"] == chrom)[0]
+            idx = idx[np.argsort(t["tx_starts"][idx], kind="stable")]
+            index[chrom] = (idx, t["tx_starts"][idx])
+        t["_index"] = index
+        log.info("annotation: %d transcripts on %d contigs (%.1fs)",
+                 len(t["genes"]), len(index), time.perf_counter() - _t0)
+        return t
 
+    def __init__(self, ref_fasta, annotations):
+        from pyfaidx import Fasta
+
+        tables = (annotations if isinstance(annotations, dict) and "_index" in annotations
+                  else self.build_tables(annotations))
+        self.__dict__.update(tables)
+
+        t0 = time.perf_counter()
+        # each process opens its own handle: a shared file descriptor would let
+        # concurrent seeks interleave
         self.ref_fasta = Fasta(str(ref_fasta), rebuild=False)
         self._fasta_keys = list(self.ref_fasta.keys())
+        log.debug("reference: %s, %d contigs (%.1fs)",
+                  Path(ref_fasta).name, len(self._fasta_keys), time.perf_counter() - t0)
 
     # -- lookups ---------------------------------------------------------
     def fasta_chrom(self, chrom: str) -> str:

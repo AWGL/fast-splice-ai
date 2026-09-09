@@ -1,7 +1,7 @@
 # FastSpliceAI
 
 Accelerated CPU inference for the SpliceAI splice-variant models: same weights,
-same numbers, **4-6x faster**, and an install that no longer pulls in TensorFlow.
+same numbers, **~6x faster**, and an install that no longer pulls in TensorFlow.
 
 Output is byte-identical to SpliceAI v1.3.1 — verified over 726 variants against
 the original running on TensorFlow. See [Validation](docs/validation.md).
@@ -68,8 +68,9 @@ pip install "git+https://github.com/your-org/fastspliceai.git@v0.1.0"
 
 > Replace `your-org/fastspliceai` with the real path once the repo is published.
 
-That gives you three commands — `fastspliceai`, `fastspliceai-tx` and
-`fastspliceai-sai10k` — and about 40 MB of dependencies. There is no TensorFlow
+That gives you four commands — `fastspliceai` (scoring), `fastspliceai-tx`
+(annotation tables from a GFF), `fastspliceai-sai10k` (aberration calls) and
+`fastspliceai-serve` (HTTP API) — and about 40 MB of dependencies. There is no TensorFlow
 and no Keras: the `.h5` weights are read with `h5py` and converted to ONNX on
 first use, cached under `$XDG_CACHE_HOME/fastspliceai`.
 
@@ -98,8 +99,8 @@ pytest
 `pytest` needs no setup: `pyproject.toml` sets `pythonpath = ["src"]`, so the
 tests import the working tree directly.
 
-The console scripts (`fastspliceai`, `fastspliceai-tx`, `fastspliceai-sai10k`)
-only exist once the package is installed, so from a bare checkout call the
+The console scripts (`fastspliceai`, `fastspliceai-tx`, `fastspliceai-sai10k`,
+`fastspliceai-serve`) only exist once the package is installed, so from a bare checkout call the
 modules and point Python at `src/`:
 
 ```sh
@@ -120,20 +121,35 @@ Three commands. Only the first is needed to score variants.
 ### 1. Score a VCF
 
 ```sh
-fastspliceai -I in.vcf -O out.vcf -R hg38.fa -A grch38 -D 500 -j 4 \
+fastspliceai -I in.vcf -O out.vcf -R hg38.fa -A grch38 -D 500 \
     --models /path/to/spliceai/models
 ```
 
+**On `-j`:** the five ensemble models already run concurrently across all cores
+within one process, so extra workers mostly contend. Measured on 12 logical
+cores, 200 variants:
+
+| | variants/s | vs stock |
+|---|---|---|
+| `-j 1` | **4.41** | **5.96x** |
+| `-j 2` | 3.57 | 4.82x |
+| `-j 5` | 3.48 | 4.70x |
+
+`-j 1` is the default and the right answer on a typical workstation. Processes
+only help once you have substantially more cores than the ~15 threads a single
+process already uses — and each one costs another copy of the models.
+
 | flag | meaning |
 |---|---|
-| `-R` | reference FASTA (indexed) |
-| `-A` | `grch37`, `grch38`, or your own annotation table |
-| `-D` | window around the variant, default 50. **500 costs only 12% more and sees 10x as much** — see [Performance](docs/performance.md#widening-the-window-is-nearly-free) |
-| `-M` | mask annotated gains / unannotated losses (0 or 1) |
-| `-j` | worker processes (memory scales with this) |
-| `--raw-scores` | also emit the REF/ALT scores behind each delta |
-| `--precision` | `fp32` (exact, default) or `int8` (~3x faster, **not** exact) |
-| `-m` | directory holding `spliceai1.h5` .. `spliceai5.h5` (**required**) |
+| `-R` | reference FASTA (indexed) — **required** |
+| `-A` | `grch37`, `grch38`, or your own annotation table — **required** |
+| `-m` | directory holding `spliceai1.h5` .. `spliceai5.h5` — **required**, never inferred |
+| `-D` | window each side of the variant, **default 500**. Upstream SpliceAI uses 50; see [Performance](docs/performance.md#window-size-is-nearly-free) |
+| `-M` | mask annotated gains / unannotated losses (0 or 1, default 0) |
+| `-t` | inference threads. Default is **half the CPU allocation, minimum 4**, so it shares a host politely. Also settable as `FASTSPLICEAI_CPUS` |
+| `-j` | worker processes, **default 1**. Leave it there unless you have many cores — see below |
+| `--raw-scores` | also emit the REF/ALT probabilities behind each delta score |
+| `--chunk-size` | records held in memory at once (default 500) |
 
 Reads and writes VCF through pysam, streaming in chunks, so `-` works for stdin
 and stdout:
@@ -173,6 +189,69 @@ Predicts the splicing aberration type — pseudoexon activation, intron retentio
 exon skipping, partial exon deletion and so on. Pure Python, no R. See
 [SAI-10k-calc](docs/sai10k.md).
 
+## Server
+
+Start-up costs ~3 s (imports, five models, transcript tables) against ~0.5 s to
+score a variant, so an on-demand lookup is mostly overhead. Run a warm engine
+instead:
+
+```sh
+fastspliceai-serve -R hg38.fa -A ann.txt -t gp.txt -m /path/to/spliceai/models \
+    --cache ~/.cache/fastspliceai/scores.db
+
+curl -s localhost:8722/health
+curl -s localhost:8722/score -d '{"variants": ["chr9-128504906-T-G"]}'
+```
+
+| | per query |
+|---|---|
+| cold CLI invocation | ~3 s |
+| warm server | ~0.5 s |
+| warm server, cache hit | ~1 ms |
+
+Two endpoints: `POST /score` takes `{"variants": [...]}` and returns the rows as
+JSON; `GET /health` reports the loaded transcript count, `-D`, and cache
+statistics, so you can confirm what a running instance is actually using.
+
+Requests are served one at a time. ONNX Runtime already uses every core for a
+single request, so concurrent requests would only contend - the same reason
+batching is a pessimisation.
+
+> **No authentication, no TLS, no audit log, no rate limiting.** It binds
+> `127.0.0.1` deliberately. This is a local accelerator, not a service to
+> expose; put it behind infrastructure you already trust before it handles
+> patient data.
+
+### As a container
+
+`Containerfile` plus a systemd Quadlet unit are in `podman/`:
+
+```sh
+podman build -t fastspliceai:latest .
+cp podman/fastspliceai.container podman/fastspliceai-cache.volume ~/.config/containers/systemd/
+systemctl --user daemon-reload && systemctl --user start fastspliceai
+```
+
+The reference genome and model weights are mounted read-only rather than baked
+in — the weights are Illumina's under CC BY-NC 4.0 and must not be redistributed
+in an image. See [podman/README.md](podman/README.md).
+
+### Caching
+
+`--cache` stores scored variants in SQLite. A score never changes for a fixed
+reference, transcript set, model weights, `-D` and `-M`, so it is safe to keep —
+**provided a stale entry can never be served.**
+
+Every key is salted with a fingerprint of those inputs (file sizes and mtimes
+for the tables and model files, plus the distance and mask). Rebuild your
+annotation, swap the weights, or change `-D`, and the fingerprint changes:
+older rows stop matching rather than being returned against the wrong
+transcripts. `/health` reports how many stale rows are present, and
+`--purge-stale` removes them.
+
+Variants that score nothing — outside every transcript, reference mismatch —
+are cached as an empty result, so they are not rescored on every request.
+
 ## Python API
 
 ```python
@@ -189,6 +268,48 @@ delta scores, the REF/ALT probabilities behind them, and the SAI-10k-calc
 aberration calls. Build the object once and reuse it. Full reference in
 [docs/api.md](docs/api.md).
 
+## Defaults worth knowing
+
+| | default | why |
+|---|---|---|
+| `-D` distance | **500** | 12% slower than 50, sees ten times as much sequence. Upstream SpliceAI uses 50; precomputed score files are 50-only, which is a real source of missed variants. |
+| threads | **half the CPU allocation, minimum 4** | This is expected to share a host. Detection respects cgroups, `cpuset`, SLURM and `OMP_NUM_THREADS`, so a container limited to 2 CPUs uses 2, not the host's 64. |
+| processes (`-j`) | **1** | The five models already run concurrently across all cores in one process. |
+| annotation | **none — required** | There is no default build. Scoring GRCh38 data against a GRCh37 table returns empty results rather than failing, so it must be explicit. |
+| model weights | **none — required** | Never discovered implicitly, so a run always records which weights it used. |
+
+All of them are overridable. `FASTSPLICEAI_CPUS` caps threads everywhere —
+CLI, API and server — which is the knob to set when embedding this in a
+webserver.
+
+## Testing
+
+```sh
+pytest                    # everything that can run on this machine
+pytest -m "not slow"      # skip the ones needing many inference passes
+```
+
+Tests that need data the repo cannot ship — a GRCh38 reference, the Illumina
+model weights, an hg19 fixture — skip themselves with a reason rather than
+failing. `tests/make_hg19_fixture.py` builds the one fixture that is fetchable.
+
+Four layers, each catching a different kind of mistake:
+
+| file | what it protects |
+|---|---|
+| `test_scores.py` | the published upstream vectors, byte for byte |
+| `test_bulk.py` | 200 variants against stock SpliceAI output |
+| `test_invariants.py` | known-pathogenic variants keep scoring highly; results do not depend on process count |
+| `test_sai10k.py`, `test_protein.py` | 22 classification columns and the protein sequence, against the R implementation |
+| `test_api.py` | argument handling, symbolic alleles, the single-vs-many variant ambiguity |
+
+`test_invariants.py` exists because of a specific failure. An INT8 path was
+calibrated on random sequence; every strong call collapsed to noise; the whole
+suite stayed green, because nothing asserted that a variant whose biology is not
+in doubt still scores highly. Golden files only catch changes to the exact rows
+they contain. A canonical `GT` donor disruption that must keep scoring above 0.9
+survives refactors that golden files do not.
+
 ## Documentation
 
 | | |
@@ -197,8 +318,10 @@ aberration calls. Build the object once and reuse it. Full reference in
 | [Performance](docs/performance.md) | throughput, window size, internals, roadmap |
 | [Transcripts](docs/transcripts.md) | annotation sources, MANE Plus Clinical, updating |
 | [SAI-10k-calc](docs/sai10k.md) | splicing aberration classification |
-| [Running in production](docs/production.md) | offline installs, reproducibility, memory |
+| [Running in production](docs/production.md) | offline installs, reproducibility, memory, serving |
 | [Python API](docs/api.md) | full API reference |
+| [Container deployment](podman/README.md) | podman image and systemd unit |
+| [MANE tables](data/mane_v1.5/README.md) | what the bundled transcript tables are |
 
 ## Why this exists
 

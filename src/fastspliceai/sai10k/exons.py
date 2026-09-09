@@ -80,4 +80,9 @@ def build_exon_table(tx):
     # matches make_consensus_table() in the R original: intronEnd is derived from
     # the 0-based exon start, so the 1-based last intron base is one higher
     df["intronEndAdj"] = df["intronEnd"] + 1
+
+    # Join keys, derived once here rather than on every classify() call.
+    df["chrom_nochr"] = df["chrom"].astype(str).str.replace("^chr", "", regex=True)
+    df["SYMBOL_refseq"] = "RefSeqTx-" + df["name"].astype(str)
+    df["SYMBOL_gene"] = df["Gene"].astype(str)
     return df

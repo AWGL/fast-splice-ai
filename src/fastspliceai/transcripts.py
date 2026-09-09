@@ -17,7 +17,6 @@ from __future__ import annotations
 import gzip
 import re
 from collections import defaultdict
-from pathlib import Path
 
 TX_FEATURES = {"transcript", "mRNA", "primary_transcript"}
 GTF_ATTR = re.compile(r'(\S+)\s+"([^"]*)"')

@@ -1,0 +1,50 @@
+# Quadlet unit for rootless podman + systemd.
+#
+#   mkdir -p ~/.config/containers/systemd
+#   cp podman/fastspliceai.container ~/.config/containers/systemd/
+#   $EDITOR ~/.config/containers/systemd/fastspliceai.container   # fix the paths
+#   systemctl --user daemon-reload
+#   systemctl --user start fastspliceai
+#   curl -s localhost:8722/health
+#
+# Logs:    journalctl --user -u fastspliceai -f
+# Restart: systemctl --user restart fastspliceai
+
+[Unit]
+Description=FastSpliceAI scoring service
+After=network-online.target
+
+[Container]
+Image=localhost/fastspliceai:latest
+ContainerName=fastspliceai
+
+# 127.0.0.1 on the host: this service has no authentication or TLS.
+PublishPort=127.0.0.1:8722:8722
+
+# --- edit these three paths ---------------------------------------------
+Volume=/data/resources/reference_genomes/GRCh38_full_analysis_set_plus_decoy_hla_masked.fa:/refs/genome.fa:ro,z
+Volume=/data/resources/reference_genomes/GRCh38_full_analysis_set_plus_decoy_hla_masked.fa.fai:/refs/genome.fa.fai:ro,z
+Volume=%h/spliceai/models:/models:ro,z
+# ------------------------------------------------------------------------
+
+Volume=fastspliceai-cache.volume:/cache:z
+
+# Resource caps: this is expected to share a host with other services.
+# 4 CPUs is what FASTSPLICEAI_CPUS defaults to in the image; keep them in step.
+PodmanArgs=--cpus=4
+Environment=FASTSPLICEAI_CPUS=4
+
+# the reference is read through mmap; give it room
+Memory=6G
+NoNewPrivileges=true
+DropCapability=ALL
+ReadOnly=true
+Tmpfs=/tmp
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

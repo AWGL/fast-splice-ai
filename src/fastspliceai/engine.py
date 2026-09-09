@@ -1,13 +1,70 @@
 """ONNX Runtime inference for the five SpliceAI models."""
 from __future__ import annotations
 
+import logging
 import os
-import warnings
-from pathlib import Path
+import time
 
 import numpy as np
 
-from .convert import ensure_onnx
+from .convert import MODEL_NAMES, ensure_onnx
+
+log = logging.getLogger("fastspliceai.engine")
+
+
+# Leave headroom by default: this is expected to share a host with other
+# services. "At most half the allocation, but never fewer than four" scales
+# sensibly from a 4-core VM to a 64-core server, and is overridden by an
+# explicit threads= / --threads, or by FASTSPLICEAI_CPUS.
+def default_threads():
+    total = available_cpus()
+    capped = min(total, max(4, total // 2))
+    if capped < total:
+        log.info("threads: using %d of %d available (default cap; set --threads "
+                 "or FASTSPLICEAI_CPUS to change)", capped, total)
+    return capped
+
+
+def available_cpus():
+    """How many CPUs we may actually use.
+
+    os.cpu_count() reports the machine, not the allocation. On a shared server
+    or in a CPU-limited container it will happily tell you 64 when the cgroup
+    grants you 2, and sizing a thread pool from it makes the job slower and a
+    bad neighbour. Take the minimum of every limit we can see.
+    """
+    limits = {}
+    try:
+        limits["affinity"] = len(os.sched_getaffinity(0))    # taskset / cpuset
+    except (AttributeError, OSError):
+        pass
+    try:                                                      # cgroup v2
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()
+        if quota != "max":
+            limits["cgroup2"] = max(1, int(float(quota) / float(period)))
+    except (OSError, ValueError):
+        pass
+    try:                                                      # cgroup v1
+        quota = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+        period = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        if quota > 0 and period > 0:
+            limits["cgroup1"] = max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    for var in ("FASTSPLICEAI_CPUS", "SLURM_CPUS_PER_TASK", "NSLOTS", "PBS_NP",
+                "OMP_NUM_THREADS"):                           # schedulers, user intent
+        try:
+            value = int(os.environ[var])
+            if value > 0:
+                limits[var] = value
+        except (KeyError, ValueError):
+            pass
+    limits.setdefault("cpu_count", os.cpu_count() or 1)
+    chosen = max(1, min(limits.values()))
+    if chosen != limits.get("cpu_count"):
+        log.info("cpus: using %d (limits seen: %s)", chosen,
+                 ", ".join("{}={}".format(k, v) for k, v in sorted(limits.items())))
+    return chosen
 
 CONTEXT = 10000            # total receptive field; output is len(input) - CONTEXT
 _ENCODE = np.zeros((256, 4), np.float32)
@@ -21,41 +78,6 @@ def one_hot(seq: str) -> np.ndarray:
     return _ENCODE[np.frombuffer(seq.encode("ascii", "replace"), np.uint8)].T.copy()
 
 
-_GLOBAL_POOL = {"size": None, "failed": False}
-
-
-def _use_global_pool(ort, n_threads):
-    """Ask ORT for one process-wide thread pool, once. Returns True if in use.
-
-    Without this each session owns a pool whose idle workers spin, so five
-    models means five pools fighting over the same cores (~13x slower).
-
-    The pool is created once per process and its size is then fixed: ORT rejects
-    per-session threads for the rest of the process's life. A later Ensemble
-    asking for a different thread count therefore still uses the global pool,
-    and we say so rather than crashing.
-    """
-    if _GLOBAL_POOL["failed"]:
-        return False
-    size = _GLOBAL_POOL["size"]
-    if size is not None:
-        if size != n_threads:
-            warnings.warn(
-                "ONNX Runtime's thread pool is process-wide and was already created "
-                "with {} threads; this Ensemble's threads={} is ignored. Set the "
-                "thread count on the first Ensemble, or use separate processes."
-                .format(size, n_threads),
-                RuntimeWarning, stacklevel=3)
-        return True
-    try:
-        ort.set_global_thread_pool_sizes(n_threads, 1)
-    except Exception:                                # pragma: no cover
-        _GLOBAL_POOL["failed"] = True
-        return False
-    _GLOBAL_POOL["size"] = n_threads
-    return True
-
-
 class Ensemble:
     """The five SpliceAI models, averaged.
 
@@ -63,98 +85,77 @@ class Ensemble:
     P(acceptor), P(donor) for each position that had full context.
     """
 
-    def __init__(self, models_dir, threads=None, precision="fp32", onnx_dir=None):
+    def __init__(self, models_dir, threads=None, onnx_dir=None, concurrent=True):
         import onnxruntime as ort
 
         ort.set_default_logger_severity(3)           # warnings only
-        if precision not in ("fp32", "int8"):
-            raise ValueError("precision must be 'fp32' or 'int8'")
-        self.precision = precision
+        t = time.perf_counter()
         paths = ensure_onnx(models_dir, onnx_dir)
-        if precision == "int8":
-            paths = [self._quantize(p) for p in paths]
 
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        opts.intra_op_num_threads = int(threads or os.cpu_count() or 1)
+        total = int(threads) if threads else default_threads()
+        # Running the five models concurrently on Python threads beats running
+        # them one after another with all cores each: a 32-channel convolution
+        # does not spread well over many threads, but five independent models
+        # do. ONNX Runtime releases the GIL inside run(), so this is real
+        # parallelism, and unlike -j it costs no extra memory.
+        # Measured on 12 logical cores: 209 ms sequential vs 175 ms concurrent.
+        # Run W models at a time with P threads each, keeping W*P near the
+        # thread budget. Naively using ceil(total/5) threads per model and
+        # always running all five oversubscribes badly when the budget is
+        # small: 2 threads became 5 models x 1 thread = 5 threads, which is
+        # why -j5 (2 threads per worker) was slower than -j1.
+        workers = min(len(MODEL_NAMES), max(1, total))
+        per = max(1, -(-total // workers))
+        self.concurrent = bool(concurrent) and workers > 1
+        self._workers = workers if self.concurrent else 1
+        if not self.concurrent:
+            per = total
+        opts.intra_op_num_threads = per
         opts.inter_op_num_threads = 1
-        # The five models run one after another, but each session would otherwise
-        # own a thread pool whose workers *spin* while waiting for work. Five
-        # spinning pools on one machine oversubscribe every core and cost ~13x.
-        # Sharing one pool across the sessions is the fix; disabling the spin is
-        # the fallback for runtimes that do not support a global pool.
-        n_threads = opts.intra_op_num_threads
-        self.sessions = None
-        if _use_global_pool(ort, n_threads):
-            opts.use_per_session_threads = False
-            try:
-                self.sessions = [
-                    ort.InferenceSession(str(p), opts, providers=["CPUExecutionProvider"])
-                    for p in paths
-                ]
-            except Exception:                        # pragma: no cover
-                _GLOBAL_POOL["failed"] = True
-                opts.use_per_session_threads = True
-        if self.sessions is None:
-            opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-            self.sessions = [
-                ort.InferenceSession(str(p), opts, providers=["CPUExecutionProvider"])
-                for p in paths
-            ]
+        # Per-session thread pools with spinning disabled. Idle ORT workers spin
+        # by default, so five pools on one machine oversubscribe every core and
+        # cost ~13x; turning the spin off fixes that without a process-wide pool.
+        # A single global pool would be faster still for sequential execution,
+        # but it cannot be reconfigured once created and it serialises the
+        # concurrent path, which is faster than sequential anyway.
+        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        log.info("models: %d sessions, %d threads each, %d at a time (%d threads total)",
+                 len(paths), per, self._workers, per * self._workers)
+        self.sessions = [
+            ort.InferenceSession(str(p), opts, providers=["CPUExecutionProvider"])
+            for p in paths
+        ]
+        log.info("models: ready (%.1fs)", time.perf_counter() - t)
 
-    @staticmethod
-    def _quantize(fp32_path):
-        """Static INT8 quantisation. NOTE: not bit-identical - see README."""
-        from onnxruntime.quantization import (
-            CalibrationDataReader,
-            QuantFormat,
-            QuantType,
-            quantize_static,
-        )
 
-        fp32_path = Path(fp32_path)
-        out = fp32_path.with_name(fp32_path.stem + ".int8.onnx")
-        if out.exists() and out.stat().st_mtime >= fp32_path.stat().st_mtime:
-            return out
+    @property
+    def _pool(self):
+        """Lazily created; one worker per model, reused across calls."""
+        from concurrent.futures import ThreadPoolExecutor
 
-        rng = np.random.default_rng(0)
-
-        class _Rand(CalibrationDataReader):
-            """Calibrate on random sequence. Splice signals are sparse, so random
-            DNA exercises the same activation ranges as real DNA for this net."""
-
-            def __init__(self):
-                batches = []
-                for _ in range(8):
-                    x = np.zeros((1, 4, CONTEXT + 1001), np.float32)
-                    x[0, rng.integers(0, 4, x.shape[2]), np.arange(x.shape[2])] = 1
-                    batches.append({"seq": x})
-                self.it = iter(batches)
-
-            def get_next(self):
-                return next(self.it, None)
-
-        quantize_static(
-            str(fp32_path),
-            str(out),
-            _Rand(),
-            quant_format=QuantFormat.QDQ,
-            activation_type=QuantType.QUInt8,
-            weight_type=QuantType.QInt8,
-            per_channel=True,
-        )
-        return out
+        pool = getattr(self, "_thread_pool", None)
+        if pool is None:
+            pool = ThreadPoolExecutor(max_workers=self._workers,
+                                      thread_name_prefix="fsai-model")
+            self._thread_pool = pool
+        return pool
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         """x: (B, 4, L) -> (B, 3, L - CONTEXT), averaged over the five models."""
         if x.ndim == 2:
             x = x[None]
         x = np.ascontiguousarray(x, np.float32)
-        acc = None
-        for s in self.sessions:
-            y = s.run(None, {"seq": x})[0]
-            acc = y if acc is None else acc + y
-        return acc / len(self.sessions)
+        if self.concurrent:
+            outs = list(self._pool.map(lambda s: s.run(None, {"seq": x})[0],
+                                       self.sessions))
+        else:
+            outs = [s.run(None, {"seq": x})[0] for s in self.sessions]
+        acc = outs[0]
+        for y in outs[1:]:
+            acc = acc + y
+        return acc / len(outs)
 
     def tile(self, x: np.ndarray, tile: int = 100_000) -> np.ndarray:
         """Score a long sequence in overlapping tiles.

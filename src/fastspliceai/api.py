@@ -16,8 +16,9 @@ Everything is offline. Nothing here opens a network connection.
 """
 from __future__ import annotations
 
-import os
+import logging
 import re
+import time
 from collections import namedtuple
 from pathlib import Path
 
@@ -26,6 +27,8 @@ import pandas as pd
 from .annotator import Annotator
 from .engine import Ensemble
 from .score import _RefCache, get_delta_scores
+
+log = logging.getLogger("fastspliceai")
 
 Variant = namedtuple("Variant", "chrom pos ref alts")
 
@@ -57,6 +60,16 @@ def parse_variant(v):
     raise TypeError("unsupported variant {!r}".format(v))
 
 
+def _read_annotation(path):
+    """Parse a SpliceAI annotation table without opening a reference genome."""
+    from .annotator import BUNDLED
+
+    key = str(path).lower()
+    if key in BUNDLED:
+        path = Path(__file__).with_name("annotations") / BUNDLED[key]
+    return pd.read_csv(path, sep="\t", dtype={"CHROM": object})
+
+
 def _is_single_variant(v):
     """True for one variant, False for a collection of them.
 
@@ -75,13 +88,20 @@ def _is_single_variant(v):
 class SpliceAI:
     """A loaded SpliceAI ensemble plus, optionally, SAI-10k-calc post-processing."""
 
-    def __init__(self, reference, annotation="grch37", models=None, transcripts=None,
-                 distance=50, mask=0, precision="fp32", threads=None, cache_size=256,
-                 thresholds=None, gff=None, genes=None):
+    def __init__(self, reference, annotation=None, models=None, transcripts=None,
+                 distance=500, mask=0, threads=None, cache_size=256,
+                 thresholds=None, gff=None, genes=None, protein=True):
         """
         reference   : indexed FASTA.
         models      : directory holding spliceai1.h5 .. spliceai5.h5. Required.
-        annotation  : "grch37"/"grch38", a SpliceAI annotation table, or a DataFrame.
+        protein     : also predict the protein consequence of each event
+                      (sequence, premature stop, NMD). Needs `transcripts`.
+        annotation  : "grch37"/"grch38", a SpliceAI annotation table, or a
+                      DataFrame. Required unless gff= is given: there is no
+                      default build, because silently scoring against the wrong
+                      one returns empty results rather than an error.
+        distance    : window each side of the variant, default 500. Costs ~12%
+                      more than 50 and sees ten times as much sequence.
         transcripts : genePred table; enables the SAI-10k-calc classification.
         gff         : a single GFF3/GTF used to derive *both* of the above. Use
                       this instead of annotation= and transcripts= so the two
@@ -90,6 +110,12 @@ class SpliceAI:
         """
         if gff is not None:
             annotation, transcripts = self._from_gff(gff, genes)
+        if annotation is None:
+            raise TypeError(
+                "SpliceAI() requires annotation= ('grch37', 'grch38', a table "
+                "path, or a DataFrame), or gff=. There is no default build: "
+                "scoring GRCh38 data against a GRCh37 table returns empty "
+                "results rather than failing.")
         if models is None:
             raise TypeError(
                 "SpliceAI() requires models=<directory holding spliceai1..5.h5>. "
@@ -99,10 +125,14 @@ class SpliceAI:
             raise FileNotFoundError("models directory not found: {}".format(models))
         self.distance = int(distance)
         self.mask = int(mask)
-        self.ensemble = Ensemble(models, threads=threads, precision=precision)
         self.annotator = Annotator(reference, annotation)
+        self.ensemble = Ensemble(models, threads=threads)
+        log.info("scoring window: -D %d (%d nt per pass)", self.distance,
+                 10000 + 2 * self.distance + 1)
         self._cache = _RefCache(self.ensemble, limit=cache_size)
-        self.thresholds = thresholds
+        from .sai10k.classify import Thresholds
+        self.thresholds = Thresholds.make(thresholds)
+        self.protein = protein
         self.exons = None
         if isinstance(transcripts, pd.DataFrame):
             self.exons = transcripts
@@ -130,6 +160,7 @@ class SpliceAI:
             gp[c] = gp[c].astype(int)
         return ann, build_exon_table(gp)
 
+
     # -- scoring ---------------------------------------------------------
     def score(self, variants, raw_scores=None, sai10k=None, include_unscored=False):
         """Score variants and return one row per (variant, transcript, allele).
@@ -152,11 +183,21 @@ class SpliceAI:
             variants = [variants]
 
         rows = []
-        for raw in variants:
+        total = len(variants)
+        every = max(1, total // 10)
+        t0 = time.perf_counter()
+        log.info("scoring %d variant%s", total, "" if total == 1 else "s")
+        for i, raw in enumerate(variants, start=1):
+            if total > 20 and i % every == 0:
+                done = time.perf_counter() - t0
+                log.info("  %d/%d  (%.1f variants/s, ~%.0fs left)", i, total,
+                         i / done, done / i * (total - i))
             v = parse_variant(raw)
             scores = get_delta_scores(v, self.annotator, self.ensemble, self.distance,
                                       self.mask, ref_cache=self._cache, raw_scores=raw_scores)
             if not scores:
+                log.debug("  %s-%s-%s: no transcript overlap or skipped",
+                          v.chrom, v.pos, v.ref)
                 if include_unscored:
                     rows.append({"#CHROM": v.chrom, "POS": v.pos, "REF": v.ref,
                                  "ALT": ",".join(v.alts), "ALLELE": None, "SYMBOL": None,
@@ -165,6 +206,9 @@ class SpliceAI:
             for s in scores:
                 rows.append(self._row(v, s, raw_scores))
         df = pd.DataFrame(rows)
+        log.info("scored %d variants -> %d rows in %.1fs (%.2f variants/s)",
+                 total, len(df), time.perf_counter() - t0,
+                 total / max(time.perf_counter() - t0, 1e-9))
         if df.empty or not sai10k:
             return df
         return self.classify(df)
@@ -187,63 +231,24 @@ class SpliceAI:
         usable = scored[scored.get("scored", True).astype(bool)].copy()
         if usable.empty:
             return scored
+        t = time.perf_counter()
         out = _classify(usable, self.exons, self.thresholds)
+        called = int((out["Any_splicing_aberration"] == "YES").sum())
+        log.info("classified %d rows, %d with a predicted aberration (%.1fs)",
+                 len(out), called, time.perf_counter() - t)
+        if self.protein:
+            from .sai10k.protein import predict as _protein
+            t = time.perf_counter()
+            out = _protein(out, self.exons, self.annotator.ref_fasta)
+            ptc = int(out["PTC_codon"].notna().sum())
+            log.info("protein: %d predictions, %d with a premature stop (%.1fs)",
+                     int(out["Protein_consequence"].notna().sum()), ptc,
+                     time.perf_counter() - t)
         return out.reset_index(drop=True)
 
 
-_POOL = {}
-
-
-def _pool_init(config):
-    """Build one engine per worker. The models are loaded in the child, never
-    inherited across a fork - ONNX Runtime and fork() do not mix."""
-    _POOL["sai"] = SpliceAI(**config)
-
-
-def _pool_score(job):
-    variants, kw = job
-    return _POOL["sai"].score(variants, **kw)
-
-
-def score_parallel(variants, processes=4, raw_scores=None, sai10k=None,
-                   include_unscored=False, **config):
-    """The API equivalent of the CLI's `-j`: score across worker processes.
-
-        df = score_parallel(variants, processes=4,
-                            reference="hg38.fa", models="...",
-                            annotation="ann.txt", transcripts="gp.txt",
-                            distance=500)
-
-    Each worker builds its own engine, so peak memory is roughly
-    `processes x 181 MB` plus the tables. `threads` is divided across the
-    workers unless you set it yourself.
-
-    Prefer this over threads for scattered variants: a single 32-channel
-    convolution does not scale well across many cores, whereas independent
-    variants are embarrassingly parallel.
-    """
-    from concurrent.futures import ProcessPoolExecutor
-
-    variants = list(variants)
-    if processes <= 1:
-        return SpliceAI(**config).score(
-            variants, raw_scores=raw_scores, sai10k=sai10k,
-            include_unscored=include_unscored)
-
-    config = dict(config)
-    config.setdefault("threads", max(1, (os.cpu_count() or 1) // processes))
-    kw = {"raw_scores": raw_scores, "sai10k": sai10k,
-          "include_unscored": include_unscored}
-    n = max(1, len(variants) // processes + 1)
-    shards = [(variants[i:i + n], kw) for i in range(0, len(variants), n)]
-    with ProcessPoolExecutor(max_workers=processes, initializer=_pool_init,
-                             initargs=(config,)) as pool:
-        frames = [f for f in pool.map(_pool_score, shards) if f is not None and not f.empty]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-
-def score_variants(variants, reference, annotation="grch37", models=None, transcripts=None,
-                   distance=50, mask=0, precision="fp32", threads=None, gff=None,
+def score_variants(variants, reference, annotation=None, models=None, transcripts=None,
+                   distance=500, mask=0, threads=None, gff=None,
                    genes=None, **kw):
     """One-shot convenience wrapper. Builds an engine, scores, throws it away.
 
@@ -251,5 +256,5 @@ def score_variants(variants, reference, annotation="grch37", models=None, transc
     instance when scoring more than one batch.
     """
     sai = SpliceAI(reference, annotation, models, transcripts, distance, mask,
-                   precision, threads, gff=gff, genes=genes)
+                   threads, gff=gff, genes=genes)
     return sai.score(variants, **kw)

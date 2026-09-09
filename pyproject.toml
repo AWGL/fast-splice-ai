@@ -39,6 +39,7 @@ test = ["pytest>=7"]
 fastspliceai = "fastspliceai.cli:main"
 fastspliceai-tx = "fastspliceai.transcripts:main"
 fastspliceai-sai10k = "fastspliceai.sai10k.cli:main"
+fastspliceai-serve = "fastspliceai.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fastspliceai"]
@@ -47,3 +48,4 @@ packages = ["src/fastspliceai"]
 # run the tests against src/ without installing the package
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["slow: needs model quantisation or many inference passes"]

@@ -23,12 +23,17 @@ import json
 import os
 from pathlib import Path
 
+import logging
+import time
+
 import h5py
 import numpy as np
 import onnx
 from onnx import TensorProto as TP
 from onnx import helper as H
 from onnx import numpy_helper as NH
+
+log = logging.getLogger("fastspliceai.convert")
 
 BN_EPS = 1e-3
 # bump when the emitted graph changes, so stale cached .onnx files are rebuilt
@@ -197,6 +202,9 @@ def ensure_onnx(models_dir, dest=None):
         if not src.exists():
             raise FileNotFoundError("missing SpliceAI model: {}".format(src))
         if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime:
+            log.info("converting %s to ONNX (first run only)", src.name)
+            t = time.perf_counter()
             convert(src, dst)
+            log.info("  %s written in %.1fs", dst.name, time.perf_counter() - t)
         out.append(dst)
     return out

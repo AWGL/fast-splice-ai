@@ -1,0 +1,3 @@
+# Named volume holding the SQLite score cache, so it survives image rebuilds.
+[Volume]
+VolumeName=fastspliceai-cache
