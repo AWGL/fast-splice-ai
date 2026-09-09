@@ -1,7 +1,7 @@
 """Convert the Keras/HDF5 SpliceAI models to ONNX without importing TensorFlow.
 
 The weights are read straight out of the HDF5 files with h5py, so installing
-FastSpliceAI does not drag in TensorFlow or Keras.
+fast-splice-ai does not drag in TensorFlow or Keras.
 
 Two things happen during conversion:
 
@@ -178,7 +178,7 @@ def convert(h5_path, onnx_path):
         )
         m = H.make_model(graph, opset_imports=[H.make_opsetid("", 13)])
         m.ir_version = 9
-        m.doc_string = "FastSpliceAI valid-conv rewrite; context={}".format(2 * total)
+        m.doc_string = "fast-splice-ai valid-conv rewrite; context={}".format(2 * total)
         onnx.checker.check_model(m)
         Path(onnx_path).parent.mkdir(parents=True, exist_ok=True)
         onnx.save(m, onnx_path)

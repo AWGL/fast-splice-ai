@@ -1,4 +1,4 @@
-"""High-level API for embedding FastSpliceAI in another application.
+"""High-level API for embedding fast-splice-ai in another application.
 
     from fastspliceai import SpliceAI
 

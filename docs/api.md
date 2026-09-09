@@ -85,4 +85,4 @@ five models already run concurrently across all cores inside one process.
 
 ---
 
-*Part of the [FastSpliceAI](../README.md) documentation.*
+*Part of the [fast-splice-ai](../README.md) documentation.*

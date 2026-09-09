@@ -1,6 +1,9 @@
-# Runtime dependencies. Mirrors [project.dependencies] in pyproject.toml.
-# For development: pip install -r requirements.txt, then run from src/ with
-#   PYTHONPATH=src python -m fastspliceai.cli ...
+# Runtime dependencies, plus pytest so a checkout is ready to develop in.
+# Mirrors [project.dependencies] in pyproject.toml.
+#
+#   pip install -r requirements.txt
+#   pytest
+#
 # There is deliberately no TensorFlow or Keras here.
 onnxruntime>=1.17
 onnx>=1.15
@@ -9,3 +12,5 @@ numpy>=1.21
 pandas>=1.3
 pyfaidx>=0.5
 pysam>=0.19
+
+pytest>=7

@@ -33,7 +33,7 @@ _SHARED = {}
 def build_parser():
     p = argparse.ArgumentParser(
         prog="fastspliceai",
-        description="FastSpliceAI {} - accelerated CPU inference for SpliceAI".format(__version__),
+        description="fast-splice-ai {} - accelerated CPU inference for SpliceAI".format(__version__),
     )
     p.add_argument("-I", metavar="input", default="-", help="input VCF (default: stdin)")
     p.add_argument("-O", metavar="output", default="-", help="output VCF (default: stdout)")

@@ -1,11 +1,11 @@
 """Build annotation tables from a local GFF3/GTF. No network, no R.
 
 This replaces SAI-10k-calc's `download_tx.R` (which pulls UCSC's ncbiRefSeq
-table through rtracklayer) and lets FastSpliceAI run against any transcript set
+table through rtracklayer) and lets fast-splice-ai run against any transcript set
 you already have on disk - RefSeq, GENCODE, Ensembl or an in-house build.
 
 Everything here is offline by construction: it reads a file you supply and
-writes tables next to it. Nothing in FastSpliceAI's scoring path opens a socket.
+writes tables next to it. Nothing in fast-splice-ai's scoring path opens a socket.
 
 Coordinate conventions
 ----------------------

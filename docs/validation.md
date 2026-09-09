@@ -1,6 +1,6 @@
 # Validation
 
-Evidence that FastSpliceAI reproduces stock SpliceAI exactly.
+Evidence that fast-splice-ai reproduces stock SpliceAI exactly.
 
 `fp32` output is identical to SpliceAI v1.3.1. The test suite asserts the
 published upstream vectors byte-for-byte:
@@ -45,4 +45,4 @@ while the suite stayed green. INT8 has since been removed; the tests remain.
 
 ---
 
-*Part of the [FastSpliceAI](../README.md) documentation.*
+*Part of the [fast-splice-ai](../README.md) documentation.*

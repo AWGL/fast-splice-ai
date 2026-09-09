@@ -1,4 +1,4 @@
-"""FastSpliceAI - an accelerated CPU inference engine for the SpliceAI models."""
+"""fast-splice-ai - an accelerated CPU inference engine for the SpliceAI models."""
 __version__ = "0.1.0"
 
 from .annotator import Annotator          # noqa: F401

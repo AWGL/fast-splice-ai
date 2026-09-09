@@ -8,7 +8,7 @@ Measured against stock SpliceAI v1.3.1 (TensorFlow with oneDNN), same five
 | | wall clock | variants/s | speedup |
 |---|---|---|---|
 | stock SpliceAI | 270.1 s | 0.74 | 1.00x |
-| FastSpliceAI | 45.3 s | **4.41** | **5.96x** |
+| fast-splice-ai | 45.3 s | **4.41** | **5.96x** |
 
 All 200 records byte-identical to stock. Reproduce with `benchmarks/bench.py`.
 
@@ -99,4 +99,4 @@ in how much of it there is, or what it runs on.
 
 ---
 
-*Part of the [FastSpliceAI](../README.md) documentation.*
+*Part of the [fast-splice-ai](../README.md) documentation.*

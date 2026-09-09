@@ -1,4 +1,4 @@
-# Running FastSpliceAI as a podman service
+# Running fast-splice-ai as a podman service
 
 A warm engine answers in ~0.5 s where a cold CLI invocation takes ~3 s, and a
 cache hit is ~1 ms. This runs that engine as a rootless container managed by

@@ -1,4 +1,4 @@
-# FastSpliceAI HTTP service.
+# fast-splice-ai HTTP service.
 #
 # The reference genome and the SpliceAI model weights are NOT baked in: the
 # reference is ~3 GB and the weights are Illumina's under CC BY-NC 4.0. Both are

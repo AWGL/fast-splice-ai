@@ -11,7 +11,7 @@
 # Restart: systemctl --user restart fastspliceai
 
 [Unit]
-Description=FastSpliceAI scoring service
+Description=fast-splice-ai scoring service
 After=network-online.target
 
 [Container]

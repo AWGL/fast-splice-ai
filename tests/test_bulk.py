@@ -1,7 +1,7 @@
 """Bulk regression: score a VCF and compare against a golden file.
 
 The golden file was produced by *stock* SpliceAI v1.3.1 (TensorFlow), so this
-suite asserts that FastSpliceAI's fp32 path is byte-identical to upstream over
+suite asserts that fast-splice-ai's fp32 path is byte-identical to upstream over
 a large, varied variant set - SNVs, insertions and deletions, on a minus-strand
 transcript, including positions where the delta score is zero.
 

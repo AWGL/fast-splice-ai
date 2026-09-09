@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fastspliceai"
+name = "fast-splice-ai"
 version = "0.1.0"
 description = "Accelerated CPU inference for the SpliceAI splice-variant models"
 readme = "README.md"
@@ -26,11 +26,10 @@ dependencies = [
   "pysam>=0.19",
 ]
 
-# placeholder URLs - update when the repository is published
 [project.urls]
-Homepage = "https://github.com/your-org/fastspliceai"
-Source = "https://github.com/your-org/fastspliceai"
-Issues = "https://github.com/your-org/fastspliceai/issues"
+Homepage = "https://github.com/AWGL/fast-splice-ai"
+Source = "https://github.com/AWGL/fast-splice-ai"
+Issues = "https://github.com/AWGL/fast-splice-ai/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

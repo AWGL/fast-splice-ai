@@ -39,7 +39,7 @@ Two consequences:
   per gene (20,274 rows, 20,274 distinct names), so out of the box you get one
   prediction per *gene*. Supply a multi-transcript RefSeq table and you get one
   per *transcript* - and many will be byte-identical.
-* FastSpliceAI keys its reference cache on `(window, strand)`, so identical
+* fast-splice-ai keys its reference cache on `(window, strand)`, so identical
   transcripts cost nothing extra. In the table above, four transcripts needed
   only three reference passes.
 
@@ -75,7 +75,7 @@ curl -O https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_45/gen
 
 Avoid the full NCBI genome GFF (`GCF_000001405.40_GRCh38.p14_genomic.gff.gz`):
 it names chromosomes by accession (`NC_000001.11`), which will not join to a
-`chr1`-named FASTA without a mapping step that FastSpliceAI does not yet do.
+`chr1`-named FASTA without a mapping step that fast-splice-ai does not yet do.
 
 Parsing MANE takes about 30 seconds and produces 19,507 transcripts. It is a
 one-off — keep the two output tables and reuse them.
@@ -141,4 +141,4 @@ Notes:
 
 ---
 
-*Part of the [FastSpliceAI](../README.md) documentation.*
+*Part of the [fast-splice-ai](../README.md) documentation.*

@@ -1,23 +1,20 @@
-# FastSpliceAI
+# fast-splice-ai
 
-Accelerated CPU inference for the SpliceAI splice-variant models: same weights,
-same numbers, **~6x faster**, and an install that no longer pulls in TensorFlow.
+Accelerated CPU inference for the SpliceAI splice-variant models.
 
-Output is byte-identical to SpliceAI v1.3.1 — verified over 726 variants against
+Output is identical to SpliceAI v1.3.1 — verified over 726 variants against
 the original running on TensorFlow. See [Validation](docs/validation.md).
 
 ## Quick start
 
-Two things are needed that this repo cannot ship: an indexed **GRCh38 FASTA**,
-and the **SpliceAI model weights** (`spliceai1.h5` .. `spliceai5.h5`, Illumina's,
-CC BY-NC 4.0 — they come with the original SpliceAI repo).
+Two things are needed - an indexed **GRCh38 FASTA**,
+and the **SpliceAI model weights** (`spliceai1.h5` .. `spliceai5.h5` -  they come with the original SpliceAI repo).
 
-MANE v1.5 transcript tables are checked in, so there is nothing to download or
-build:
+MANE v1.5 transcript tables are included.
 
 ```sh
-git clone https://github.com/your-org/fastspliceai.git
-cd fastspliceai
+git clone https://github.com/AWGL/fast-splice-ai.git
+cd fast-splice-ai
 pip install -r requirements.txt
 
 python examples/grch38_example.py \
@@ -28,60 +25,24 @@ python examples/grch38_example.py \
 ```
 
 ```
-#CHROM       POS REF ALT                  SYMBOL  DS_AG  DS_AL  DS_DG  DS_DL  DP_DL Any_splicing_aberration Partial_exon_deletion
-     9 128504906   T   G RefSeqTx-NM_001003722.2   0.00   0.01   0.42   0.99     -2                     YES                   YES
-     9  21994137   A   C    RefSeqTx-NM_058195.4   0.02   0.05   0.52   0.99      2                     YES                   YES
+=== SpliceAI delta scores ===
+  gene                   #CHROM       POS REF ALT  DS_AG  DS_AL  DS_DG  DS_DL
+  GLE1  donor +2 canonical GT   chr9 128504906   T   G   0.00   0.01   0.42   0.99
+   NF1  c.288+2025T>G          chr17  31161118   T   G   0.81   0.00   0.87   0.00
+  CFTR  c.3718-2477C>T          chr7 117639961   C   T   0.10   0.00   0.16   0.00
+  ...
+
+=== predicted consequence (SAI-10k-calc + protein) ===
+  GLE1  Partial exon deletion (41bp) + premature stop at codon 54, NMD predicted
+   NF1  Pseudoexon activation in intron 3 (108bp) + premature stop at codon 97, NMD predicted
+  CFTR  No splicing aberration predicted
 ```
-
-That is the whole example — 27 lines, no VCF in or out. It scores two variants
-through the Python API and prints the delta scores plus the SAI-10k-calc
-aberration calls.
-
-Both variants disrupt a canonical `GT` donor, and between them they show why the
-transcript set matters:
-
-* **GLE1** `9-128504906-T-G`. Exon 1 ends at chr9:128,504,904 and the reference
-  reads `GCGAG|GTGAGC`, so this is the `T` of the donor. `DS_DL 0.99` at
-  `DP_DL -2` — near-certain loss, at exactly that base.
-* **CDKN2A p14ARF** `9-21994137-A-C`. Exon 1β ends at chr9:21,994,139 on the
-  minus strand, reading `CAG|GTAGG`, so this is the donor +2 base. It lies
-  **outside the MANE Select transcript** (p16INK4a, `NM_000077.5`) altogether —
-  with a Select-only annotation it produces no row at all. See
-  [Transcripts](docs/transcripts.md#mane-select-and-mane-plus-clinical).
-
-Nothing is discovered implicitly: the reference, both transcript tables and the
-model directory are all passed in. To use your own transcripts instead of MANE,
-build the two tables with [`fastspliceai-tx`](#2-build-annotation-tables-from-your-own-transcripts)
-and pass those paths.
 
 ## Install
 
 ```sh
-pip install "git+https://github.com/your-org/fastspliceai.git"
+pip install "git+https://github.com/AWGL/fast-splice-ai.git"
 ```
-
-Pin a tag for anything reproducible:
-
-```sh
-pip install "git+https://github.com/your-org/fastspliceai.git@v0.1.0"
-```
-
-> Replace `your-org/fastspliceai` with the real path once the repo is published.
-
-That gives you four commands — `fastspliceai` (scoring), `fastspliceai-tx`
-(annotation tables from a GFF), `fastspliceai-sai10k` (aberration calls) and
-`fastspliceai-serve` (HTTP API) — and about 40 MB of dependencies. There is no TensorFlow
-and no Keras: the `.h5` weights are read with `h5py` and converted to ONNX on
-first use, cached under `$XDG_CACHE_HOME/fastspliceai`.
-
-The **model weights are not bundled**. They are Illumina's, under CC BY-NC 4.0.
-Point `--models` at a directory holding `spliceai1.h5` .. `spliceai5.h5`; it is
-required, and the weights are never discovered implicitly, so every run records
-which copy it used.
-
-Every dependency is a plain wheel, so a stock `venv` is enough — see
-[Running in production](docs/production.md) for air-gapped installs, conda and
-version pinning.
 
 ### Development
 
@@ -89,34 +50,14 @@ Install the dependencies only — the package itself stays where you are editing
 it, uninstalled:
 
 ```sh
-git clone https://github.com/your-org/fastspliceai.git
-cd fastspliceai
-pip install -r requirements-dev.txt
+git clone https://github.com/AWGL/fast-splice-ai.git
+cd fast-splice-ai
+pip install -r requirements.txt
 
 pytest
 ```
 
-`pytest` needs no setup: `pyproject.toml` sets `pythonpath = ["src"]`, so the
-tests import the working tree directly.
-
-The console scripts (`fastspliceai`, `fastspliceai-tx`, `fastspliceai-sai10k`,
-`fastspliceai-serve`) only exist once the package is installed, so from a bare checkout call the
-modules and point Python at `src/`:
-
-```sh
-export PYTHONPATH=$PWD/src
-
-python -m fastspliceai.cli -I in.vcf -O out.vcf -R hg38.fa -A grch38
-python -m fastspliceai.transcripts annotation.gff3.gz -o ann.txt --out-genepred gp.txt
-python -m fastspliceai.sai10k.cli -I scored.vcf -t gp.txt -O calls.tsv
-```
-
-`requirements.txt` mirrors `[project.dependencies]` in `pyproject.toml`;
-`requirements-dev.txt` adds pytest.
-
 ## Usage
-
-Three commands. Only the first is needed to score variants.
 
 ### 1. Score a VCF
 
@@ -217,10 +158,6 @@ Requests are served one at a time. ONNX Runtime already uses every core for a
 single request, so concurrent requests would only contend - the same reason
 batching is a pessimisation.
 
-> **No authentication, no TLS, no audit log, no rate limiting.** It binds
-> `127.0.0.1` deliberately. This is a local accelerator, not a service to
-> expose; put it behind infrastructure you already trust before it handles
-> patient data.
 
 ### As a container
 
@@ -233,24 +170,7 @@ systemctl --user daemon-reload && systemctl --user start fastspliceai
 ```
 
 The reference genome and model weights are mounted read-only rather than baked
-in — the weights are Illumina's under CC BY-NC 4.0 and must not be redistributed
-in an image. See [podman/README.md](podman/README.md).
-
-### Caching
-
-`--cache` stores scored variants in SQLite. A score never changes for a fixed
-reference, transcript set, model weights, `-D` and `-M`, so it is safe to keep —
-**provided a stale entry can never be served.**
-
-Every key is salted with a fingerprint of those inputs (file sizes and mtimes
-for the tables and model files, plus the distance and mask). Rebuild your
-annotation, swap the weights, or change `-D`, and the fingerprint changes:
-older rows stop matching rather than being returned against the wrong
-transcripts. `/health` reports how many stale rows are present, and
-`--purge-stale` removes them.
-
-Variants that score nothing — outside every transcript, reference mismatch —
-are cached as an empty result, so they are not rescored on every request.
+in.
 
 ## Python API
 
@@ -275,12 +195,6 @@ aberration calls. Build the object once and reuse it. Full reference in
 | `-D` distance | **500** | 12% slower than 50, sees ten times as much sequence. Upstream SpliceAI uses 50; precomputed score files are 50-only, which is a real source of missed variants. |
 | threads | **half the CPU allocation, minimum 4** | This is expected to share a host. Detection respects cgroups, `cpuset`, SLURM and `OMP_NUM_THREADS`, so a container limited to 2 CPUs uses 2, not the host's 64. |
 | processes (`-j`) | **1** | The five models already run concurrently across all cores in one process. |
-| annotation | **none — required** | There is no default build. Scoring GRCh38 data against a GRCh37 table returns empty results rather than failing, so it must be explicit. |
-| model weights | **none — required** | Never discovered implicitly, so a run always records which weights it used. |
-
-All of them are overridable. `FASTSPLICEAI_CPUS` caps threads everywhere —
-CLI, API and server — which is the knob to set when embedding this in a
-webserver.
 
 ## Testing
 
@@ -288,27 +202,6 @@ webserver.
 pytest                    # everything that can run on this machine
 pytest -m "not slow"      # skip the ones needing many inference passes
 ```
-
-Tests that need data the repo cannot ship — a GRCh38 reference, the Illumina
-model weights, an hg19 fixture — skip themselves with a reason rather than
-failing. `tests/make_hg19_fixture.py` builds the one fixture that is fetchable.
-
-Four layers, each catching a different kind of mistake:
-
-| file | what it protects |
-|---|---|
-| `test_scores.py` | the published upstream vectors, byte for byte |
-| `test_bulk.py` | 200 variants against stock SpliceAI output |
-| `test_invariants.py` | known-pathogenic variants keep scoring highly; results do not depend on process count |
-| `test_sai10k.py`, `test_protein.py` | 22 classification columns and the protein sequence, against the R implementation |
-| `test_api.py` | argument handling, symbolic alleles, the single-vs-many variant ambiguity |
-
-`test_invariants.py` exists because of a specific failure. An INT8 path was
-calibrated on random sequence; every strong call collapsed to noise; the whole
-suite stayed green, because nothing asserted that a variant whose biology is not
-in doubt still scores highly. Golden files only catch changes to the exact rows
-they contain. A canonical `GT` donor disruption that must keep scoring above 0.9
-survives refactors that golden files do not.
 
 ## Documentation
 
@@ -318,31 +211,14 @@ survives refactors that golden files do not.
 | [Performance](docs/performance.md) | throughput, window size, internals, roadmap |
 | [Transcripts](docs/transcripts.md) | annotation sources, MANE Plus Clinical, updating |
 | [SAI-10k-calc](docs/sai10k.md) | splicing aberration classification |
-| [Running in production](docs/production.md) | offline installs, reproducibility, memory, serving |
 | [Python API](docs/api.md) | full API reference |
 | [Container deployment](podman/README.md) | podman image and systemd unit |
 | [MANE tables](data/mane_v1.5/README.md) | what the bundled transcript tables are |
 
-## Why this exists
-
-SpliceAI is a fully convolutional network with a ±5000 nt receptive field. The
-stock tool runs it on a 10,101 nt window to produce **101** scored positions,
-once per model, twice per variant (reference and alternate), five models deep:
-
-| | |
-|---|---|
-| MACs per output position | 693 k |
-| MACs per forward pass (10,101 nt window) | 7.0 G (14.0 GFLOP) |
-| Passes per biallelic SNV | 10 (5 models × ref/alt) |
-| **MACs per variant** | **70 G (140 GFLOP)** |
-| Useful output positions | 101 |
-
-Roughly 99% of the arithmetic is discarded. FastSpliceAI keeps the model
-untouched and fixes the scheduling and the runtime around it.
 
 ## Licensing
 
 SpliceAI's source was **GPLv3 through v1.3.1**; Illumina relicensed the upstream
 repository to PolyForm Strict 1.0.0 on 2025-07-18, which forbids distributing
-the software or making new works based on it. FastSpliceAI therefore derives
-from the GPLv3-era code and is distributed under the **GPLv3**.
+the software or making new works based on it. fast-splice-ai therefore derives
+from the GPLv3-era code.

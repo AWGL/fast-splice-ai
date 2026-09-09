@@ -1,4 +1,4 @@
-"""FastSpliceAI must reproduce SpliceAI v1.3.1 output exactly."""
+"""fast-splice-ai must reproduce SpliceAI v1.3.1 output exactly."""
 from collections import namedtuple
 from pathlib import Path
 
