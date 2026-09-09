@@ -14,6 +14,10 @@ By default the response carries the delta scores and positions, the REF/ALT
 probabilities behind them, and the predicted consequence. Add
 {"fields": "all"} for every column, or {"fields": [...]} to choose.
 
+{"all_scores": true} adds ALL_NON_ZERO_SCORES: every position in the window
+carrying a signal, not just the four maxima. Useful for a single variant you
+are interpreting; skipped by the cache, so do not use it for bulk work.
+
 SECURITY: there is no authentication, no TLS and no audit log, and it binds
 127.0.0.1 for that reason. It is a local accelerator, not something to expose.
 Put it behind infrastructure you already trust before it sees patient data.
@@ -37,6 +41,7 @@ MAX_VARIANTS = 1000
 # Pass {"fields": "all"} for everything, or a list to choose.
 DEFAULT_FIELDS = [
     "#CHROM", "POS", "REF", "ALT", "SYMBOL", "Used_RefSeq_Transcript",
+    "EXON", "INTRON", "strand",
     # delta scores and the positions they occur at
     "DS_AG", "DS_AL", "DS_DG", "DS_DL",
     "DP_AG", "DP_AL", "DP_DG", "DP_DL",
@@ -45,6 +50,7 @@ DEFAULT_FIELDS = [
     "DS_DG_REF", "DS_DG_ALT", "DS_DL_REF", "DS_DL_ALT",
     # interpretation
     "Consequence", "Event_confidence", "Confidence_note",
+    "Predicted_LOF", "LOF_note", "Predicted_outcomes",
     "Protein_consequence", "PTC_codon", "NMD_predicted",
 ]
 
@@ -94,7 +100,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(413, {"error": "body must be 1..{} bytes".format(MAX_BODY)})
         try:
             req = json.loads(self.rfile.read(length))
+            all_scores = bool(req.get("all_scores", False))
             fields = req.get("fields", DEFAULT_FIELDS)
+            if all_scores and isinstance(fields, list):
+                fields = fields + ["ALL_NON_ZERO_SCORES", "SCORES_FOR_INSERTED_BASES"]
             if fields == "all":
                 fields = None
             elif not isinstance(fields, list):
@@ -110,7 +119,10 @@ class _Handler(BaseHTTPRequestHandler):
         t0 = time.perf_counter()
         rows, todo, cached = [], [], 0
         for v in variants:
-            hit = self.cache.get(str(v)) if self.cache is not None else None
+            # a cached row was stored without the profile, so skip the cache
+            # when it is asked for rather than silently returning less
+            hit = (self.cache.get(str(v))
+                   if self.cache is not None and not all_scores else None)
             if hit is None:
                 todo.append(str(v))
             else:
@@ -126,7 +138,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(503, {"error": "busy, too many queued requests"})
             try:
                 with self.lock:
-                    df = self.engine.score(todo, include_unscored=False)
+                    df = self.engine.score(todo, include_unscored=False,
+                                           all_scores=all_scores)
             finally:
                 if self.queue is not None:
                     self.queue.release()

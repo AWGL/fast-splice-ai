@@ -28,6 +28,7 @@ VARIANTS = [
     ("chr9-128504906-T-G",  "GLE1",   "donor +2, canonical GT"),
     ("chr9-21994137-A-C",   "CDKN2A", "p14ARF donor +2 - MANE Plus Clinical only"),
     ("chr8-140300616-T-G",  "TRPS1",  "exon 11 skipping"),
+    ("chr17-7674291-C-T",   "TP53",   "acceptor loss, several possible outcomes"),
     # --- deep intronic, known pseudoexon-activating ---------------------
     ("chr17-31161118-T-G",  "NF1",    "c.288+2025T>G   neurofibromatosis"),
     ("chr1-215891198-T-C",  "USH2A",  "c.7595-2144A>G  Usher syndrome 2"),
@@ -62,6 +63,15 @@ print(df[["gene", "SYMBOL", "Consequence"]].to_string(index=False))
 
 print("\n{} variants scored in {:.1f} s total (including start-up)"
       .format(len(VARIANTS), time.perf_counter() - _t0))
+
+print("\n=== predicted outcome ===")
+lof = df[df["Predicted_LOF"].notna()].drop_duplicates(subset=["POS", "SYMBOL"])
+for _, r in lof.iterrows():
+    print("{:7} {:10} {}".format(r["gene"], r["Predicted_LOF"], r["LOF_note"]))
+    for o in r["Predicted_outcomes"]:
+        print("          {:15} {:4}bp  score {:.3f}  {}".format(
+            o["event"], o["bp"], o["score"],
+            "frameshift" if o["frameshift"] else "in-frame"))
 
 hits = df[df["Protein_consequence"].notna()]
 if len(hits):

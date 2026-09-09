@@ -19,7 +19,19 @@ OUTPUT_COLS = [
     "Exon_skipping", "Lost_exons", "Exon_skipping_frameshift",
     "Retained_intron_size", "Intron_retention", "Retained_intron",
     "Intron_retention_frameshift",
+    "EXON", "INTRON", "Event_confidence", "Confidence_note",
+    "Predicted_LOF", "LOF_note", "Predicted_outcomes",
 ]
+
+
+def _flatten_outcomes(value):
+    """`event:bp:FS|...` - every option kept, one field, still parseable."""
+    if not isinstance(value, list) or not value:
+        return ""
+    return "|".join(
+        "{}:{}:{}:{}".format(o["event"].replace(" ", "_"), o["bp"],
+                             "FS" if o["frameshift"] else "INFRAME", o["score"])
+        for o in value)
 
 
 def main(argv=None):
@@ -45,6 +57,9 @@ def main(argv=None):
         print("note: input has no REF/ALT scores; rerun fastspliceai with --raw-scores "
               "for improved partial-deletion and partial-retention calls", file=sys.stderr)
     out = classify(variants, build_exon_table(load_genepred(a.transcripts)), thresholds)
+    if "Predicted_outcomes" in out.columns:
+        out = out.copy()
+        out["Predicted_outcomes"] = out["Predicted_outcomes"].map(_flatten_outcomes)
     cols = [c for c in OUTPUT_COLS if c in out.columns]
     handle = sys.stdout if a.output == "-" else open(a.output, "w")
     out[cols].to_csv(handle, sep="\t", index=False, na_rep="NA")

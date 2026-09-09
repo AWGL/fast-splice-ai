@@ -25,6 +25,69 @@ REFALT_FIELDS = ["DS_AG_REF", "DS_AG_ALT", "DS_AL_REF", "DS_AL_ALT",
                  "DS_DG_REF", "DS_DG_ALT", "DS_DL_REF", "DS_DL_ALT"]
 
 
+# a runner-up this close to the winner makes the predicted position ambiguous
+RIVAL_AMBIGUOUS = 0.8
+
+
+def _outcomes(r):
+    """Each plausible outcome, and whether it shifts the reading frame.
+
+    A splice-disrupting variant usually has several possible fates - the exon
+    is skipped, or one of two cryptic sites is used. Reporting only the
+    strongest hides that. But if *every* fate frameshifts, which one occurs
+    stops mattering: the protein is lost either way, and that is the call to
+    surface.
+
+    Shifts are measured against the native site the variant destroys, using the
+    same offset convention as DP_AG/DP_AL/DP_DG/DP_DL.
+    """
+    cands = r.get("CANDIDATES")
+    if not isinstance(cands, list) or not cands:
+        return []
+    lost = {c["kind"].split("_")[0]: c["offset"]
+            for c in cands if c["kind"].endswith("_loss")}
+    size = r.get("exon_size")
+    outs = []
+    for c in cands:
+        which, event = c["kind"].split("_")
+        if event == "loss":
+            if pd.isna(size):
+                continue
+            n = int(size)
+            outs.append({"event": "exon skipping", "bp": n,
+                         "frameshift": n % 3 != 0, "score": c["score"]})
+        elif which in lost:
+            n = abs(c["offset"] - lost[which])
+            if n == 0:
+                continue
+            outs.append({"event": "{} shift".format(which), "bp": n,
+                         "frameshift": n % 3 != 0, "score": c["score"]})
+    # one row per distinct consequence, strongest first
+    seen, uniq = set(), []
+    for o in sorted(outs, key=lambda o: -o["score"]):
+        key = (o["event"], o["bp"])
+        if key not in seen:
+            seen.add(key); uniq.append(o)
+    return uniq
+
+
+def rivals_for(r):
+    """Which of the four events actually drove this call.
+
+    Only those matter: a tie among acceptor-gain positions says nothing about
+    an exon-skipping call driven by the losses.
+    """
+    events = []
+    if r["Pseudoexon_activation"] == "YES" or r["Increased_exon_inclusion"] == "YES":
+        events += ["AG", "DG"]
+    if r["Exon_skipping"] == "YES" or r["Intron_retention"] == "YES":
+        events += ["AL", "DL"]
+    if r["Partial_exon_deletion"] == "YES" or r["Partial_intron_retention"] == "YES":
+        events += ["AG"] if r["Cryptic_Acceptor_activation"] == "YES" else []
+        events += ["DG"] if r["Cryptic_Donor_activation"] == "YES" else []
+    return events
+
+
 @dataclass
 class Thresholds:
     """Defaults match SAI-10k-calc's optparse defaults exactly.
@@ -333,6 +396,34 @@ def classify(variants, exons, t=None):
         res = d[ie].apply(lambda r: _find_exons_lost_gain(r, by_tx, "GEO_DG", "GEO_AG"), axis=1)
         d.loc[ie, "Exon_with_increased_inclusion"] = [x[0] for x in res]
 
+    # Where the variant sits, VEP-style: "7/11" for exonic, or the intron it
+    # falls in. intron_num is the intron 5' of this exon in transcript order,
+    # next_intron_num the one 3' of it; both are already strand-aware.
+    in_prev = (d["POS"] >= d["intronStart"]) & (d["POS"] <= d["intronEnd"])
+    in_next = (d["POS"] >= d["next_intronStart"]) & (d["POS"] <= d["next_intronEnd"])
+    n_introns = d["exonCount"] - 1
+    d["EXON"] = np.where(d["exonic"] == "yes",
+                         d["eNum"].astype(str) + "/" + d["exonCount"].astype(str), None)
+    d["INTRON"] = np.select(
+        [in_prev, in_next],
+        [d["intron_num"].astype("Int64").astype(str) + "/" + n_introns.astype(str),
+         d["next_intron_num"].astype("Int64").astype(str) + "/" + n_introns.astype(str)],
+        default=None)
+
+    # --- is the outcome disruptive whichever way it goes? -----------------
+    outcomes, lof, summary = [], [], []
+    for _, r in d.iterrows():
+        outs = _outcomes(r)
+        outcomes.append(outs)
+        if not outs:
+            lof.append(None); summary.append(None); continue
+        bad = sum(1 for o in outs if o["frameshift"])
+        lof.append("YES" if bad == len(outs) else "UNCERTAIN" if bad else "NO")
+        summary.append("{}/{} outcomes frameshift".format(bad, len(outs)))
+    d["Predicted_outcomes"] = outcomes
+    d["Predicted_LOF"] = lof
+    d["LOF_note"] = summary
+
     d["Used_RefSeq_Transcript"] = d["name"]
 
     # How well supported is each call? The limiting delta score, plus whether
@@ -352,6 +443,14 @@ def classify(variants, exons, t=None):
             limits.append(float(r["DS_AGDG_MIN"]))
         if r["Partial_exon_deletion"] == "YES" or r["Partial_intron_retention"] == "YES":
             limits.append(float(max(r["DS_AG"], r["DS_DG"])))
+        # A rival site close behind the winner means the predicted *position* is
+        # a coin flip even when the score is strong, so the event may be real
+        # while the reported coordinates are not.
+        for ev in rivals_for(r):
+            frac = r.get("RIVAL_" + ev)
+            if frac is not None and frac >= RIVAL_AMBIGUOUS:
+                notes.append("rival {} site at {:.0%} of the top".format(ev, frac))
+
         if not limits:
             conf.append(None); why.append(None); continue
         lim = min(limits)

@@ -12,6 +12,26 @@ log = logging.getLogger("fastspliceai.annotator")
 BUNDLED = {"grch37": "grch37.txt", "grch38": "grch38.txt"}
 
 
+def _open_fasta(path):
+    """pyfaidx for plain FASTA, pyfastx for bgzipped.
+
+    pyfaidx cannot read a bgzipped reference; pyfastx can, and exposes the same
+    ``fasta[chrom][a:b].seq`` interface we rely on.
+    """
+    path = str(path)
+    if path.endswith((".gz", ".bgz")):
+        try:
+            import pyfastx
+        except ImportError:                          # pragma: no cover
+            raise ImportError(
+                "a bgzipped reference needs pyfastx (pip install pyfastx); "
+                "or decompress the FASTA and use pyfaidx")
+        return pyfastx.Fasta(path)
+    from pyfaidx import Fasta
+
+    return Fasta(path, rebuild=False)
+
+
 def normalise_chrom(source: str, target: str) -> str:
     """Match the 'chr' prefix convention of `target`."""
     s_pre, t_pre = source.startswith("chr"), target.startswith("chr")
@@ -79,8 +99,6 @@ class Annotator:
         return t
 
     def __init__(self, ref_fasta, annotations):
-        from pyfaidx import Fasta
-
         tables = (annotations if isinstance(annotations, dict) and "_index" in annotations
                   else self.build_tables(annotations))
         self.__dict__.update(tables)
@@ -88,7 +106,7 @@ class Annotator:
         t0 = time.perf_counter()
         # each process opens its own handle: a shared file descriptor would let
         # concurrent seeks interleave
-        self.ref_fasta = Fasta(str(ref_fasta), rebuild=False)
+        self.ref_fasta = _open_fasta(ref_fasta)
         self._fasta_keys = list(self.ref_fasta.keys())
         log.debug("reference: %s, %d contigs (%.1fs)",
                   Path(ref_fasta).name, len(self._fasta_keys), time.perf_counter() - t0)

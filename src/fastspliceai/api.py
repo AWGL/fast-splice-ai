@@ -22,6 +22,7 @@ import time
 from collections import namedtuple
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .annotator import Annotator
@@ -162,9 +163,53 @@ class SpliceAI:
 
 
     # -- scoring ---------------------------------------------------------
-    def score(self, variants, raw_scores=None, sai10k=None, include_unscored=False):
+    def score_reference(self, chrom, pos, transcript=None):
+        """Score the reference sequence alone - no variant.
+
+        Answers "what does this locus look like normally", which is the natural
+        baseline for interpreting a delta score.
+        """
+        from .engine import CONTEXT, one_hot
+
+        wid = CONTEXT + 2 * self.distance + 1
+        idxs = self.annotator.transcripts(chrom, pos)
+        out = []
+        for i in idxs:
+            name = self.annotator.genes[i]
+            if transcript is not None and name != transcript:
+                continue
+            seq = self.annotator.sequence(chrom, pos - wid // 2 - 1, pos + wid // 2)
+            if len(seq) != wid:
+                continue
+            minus = self.annotator.strands[i] == "-"
+            x = one_hot(seq)[None]
+            if minus:
+                x = x[:, ::-1, ::-1]
+            y = self.ensemble.predict(np.ascontiguousarray(x))
+            if minus:
+                y = y[:, :, ::-1]
+            y = np.ascontiguousarray(y[0].T)
+            half = (2 * self.distance + 1) // 2
+            for k in range(len(y)):
+                if max(y[k, 1], y[k, 2]) >= 0.01:
+                    offset = k - half
+                    out.append({
+                        "SYMBOL": name,
+                        "pos": pos + (-offset if minus else offset),
+                        "offset": offset,
+                        "acceptor": round(float(y[k, 1]), 3),
+                        "donor": round(float(y[k, 2]), 3),
+                    })
+        return pd.DataFrame(out)
+
+    def score(self, variants, raw_scores=None, sai10k=None, include_unscored=False,
+              all_scores=False):
         """Score variants and return one row per (variant, transcript, allele).
 
+        all_scores : attach ALL_NON_ZERO_SCORES, every position in the window
+                     carrying a signal rather than only the four maxima. Costs a
+                     Python pass over the window per variant, so it is off by
+                     default.
         raw_scores : include the REF/ALT probabilities behind each delta score.
                      On by default - they cost nothing extra, since both passes
                      are computed anyway, and SAI-10k-calc's improved partial
@@ -193,8 +238,11 @@ class SpliceAI:
                 log.info("  %d/%d  (%.1f variants/s, ~%.0fs left)", i, total,
                          i / done, done / i * (total - i))
             v = parse_variant(raw)
+            extras = []
             scores = get_delta_scores(v, self.annotator, self.ensemble, self.distance,
-                                      self.mask, ref_cache=self._cache, raw_scores=raw_scores)
+                                      self.mask, ref_cache=self._cache,
+                                      raw_scores=raw_scores, all_scores=all_scores,
+                                      extras=extras)
             if not scores:
                 log.debug("  %s-%s-%s: no transcript overlap or skipped",
                           v.chrom, v.pos, v.ref)
@@ -203,8 +251,18 @@ class SpliceAI:
                                  "ALT": ",".join(v.alts), "ALLELE": None, "SYMBOL": None,
                                  "scored": False})
                 continue
-            for s in scores:
-                rows.append(self._row(v, s, raw_scores))
+            for n, s in enumerate(scores):
+                row = self._row(v, s, raw_scores)
+                if n < len(extras):
+                    for k, val in extras[n].items():
+                        if k == "candidates":
+                            row["CANDIDATES"] = val
+                        elif k == "rival":
+                            for ev, frac in val.items():
+                                row["RIVAL_" + ev] = frac
+                        elif val:
+                            row[k] = val
+                rows.append(row)
         df = pd.DataFrame(rows)
         log.info("scored %d variants -> %d rows in %.1fs (%.2f variants/s)",
                  total, len(df), time.perf_counter() - t0,
