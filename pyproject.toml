@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastspliceai"
+version = "0.1.0"
+description = "Accelerated CPU inference for the SpliceAI splice-variant models"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+]
+# No TensorFlow, no Keras. onnxruntime ships as a ~15 MB manylinux wheel with
+# no CUDA, no protobuf runtime pin and no compiler needed.
+dependencies = [
+  "onnxruntime>=1.17",
+  "onnx>=1.15",
+  "h5py>=3.1",
+  "numpy>=1.21",
+  "pandas>=1.3",
+  "pyfaidx>=0.5",
+  "pysam>=0.19",
+]
+
+# placeholder URLs - update when the repository is published
+[project.urls]
+Homepage = "https://github.com/your-org/fastspliceai"
+Source = "https://github.com/your-org/fastspliceai"
+Issues = "https://github.com/your-org/fastspliceai/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+fastspliceai = "fastspliceai.cli:main"
+fastspliceai-tx = "fastspliceai.transcripts:main"
+fastspliceai-sai10k = "fastspliceai.sai10k.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fastspliceai"]
+
+[tool.pytest.ini_options]
+# run the tests against src/ without installing the package
+pythonpath = ["src"]
+testpaths = ["tests"]
