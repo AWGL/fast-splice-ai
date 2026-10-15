@@ -245,4 +245,27 @@ pytest -m "not slow"      # skip the ones needing many inference passes
 SpliceAI's source was **GPLv3 through v1.3.1**; Illumina relicensed the upstream
 repository to PolyForm Strict 1.0.0 on 2025-07-18, which forbids distributing
 the software or making new works based on it. fast-splice-ai therefore derives
-from the GPLv3-era code.
+from the GPLv3-era code (no SpliceAI code has changed since v1.3.1), and is
+released under GPLv3 (`LICENSE`).
+
+The SpliceAI model weights are **not** included. They are Illumina's, under
+CC BY-NC 4.0 (academic and non-commercial use); point `models` at your own copy
+of SpliceAI's `spliceai/models`, which fast-splice-ai converts to ONNX locally.
+
+The splicing aberration classification (`src/fastspliceai/sai10k/`) is a port of
+[SAI-10k-calc](https://github.com/adavi4/SAI-10k-calc), used under the MIT
+License - see `LICENSES/SAI-10k-calc.txt`.
+
+The bundled MANE v1.5 tables are built from NCBI's public MANE release.
+
+## Acknowledgements
+
+Thanks to the SAI-10k-calc authors - Daffodil Canson, Aimee Davidson, Olga
+Kondrashova and colleagues - whose rules for turning SpliceAI scores into
+predicted splicing aberrations and protein consequences this package ports
+([Canson, Davidson et al., *Bioinformatics* 2023](https://doi.org/10.1093/bioinformatics/btad179);
+[Canson, Parsons et al., *Genome Research* 2025](https://genome.cshlp.org/content/early/2025/08/06/gr.279557.124)). Please cite their papers if you use the predicted
+consequences.
+
+Thanks also to Kishore Jaganathan, Kyle Farh and colleagues at Illumina for
+SpliceAI (Jaganathan et al., *Cell* 2019) and its trained models.
