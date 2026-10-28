@@ -248,8 +248,15 @@ def _closest_exon(variants, exons):
     m = v.merge(ex, left_on=["chrom_nochr", "SYMBOL"], right_on=["chrom_nochr", "SYMBOL"],
                 how="left", suffixes=("", "_ex"))
     m = m[m["name"].notna()].copy()
-    m["dist_exon_start"] = m["POS"] - m["eStart"] - 1
-    m["dist_exon_end"] = m["POS"] - m["eEnd"]
+    # Measure from the variant's base nearest the exon, not from POS: a deletion's
+    # POS is its first (padding) base, so a 2.6 kb deletion ending 7 bp before an
+    # exon would otherwise look 2.6 kb away - deep intronic, and never an exon
+    # skip. The exon's first base clamped into the variant's span is that nearest
+    # base; for an SNV or an insertion the span is POS alone, so nothing changes.
+    span_end = m["POS"] + m["REF"].astype(str).str.len() - 1
+    pos = np.minimum(np.maximum(m["POS"], m["eStart"] + 1), span_end)
+    m["dist_exon_start"] = pos - m["eStart"] - 1
+    m["dist_exon_end"] = pos - m["eEnd"]
     m["exonic"] = np.where((m["dist_exon_start"] > 0) & (m["dist_exon_end"] < 0), "yes", "no")
     m["dist_exon_closest_abs"] = np.minimum(m["dist_exon_start"].abs(), m["dist_exon_end"].abs())
     best = m.groupby(["ID", "SYMBOL"])["dist_exon_closest_abs"].transform("min")

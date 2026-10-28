@@ -56,3 +56,28 @@ def test_exon_table_orientation():
     b2 = ex[ex.name == "NM_000059.4"].sort_values("eNum")
     assert b2.iloc[0].strand == 1
     assert b2.iloc[0].eStart < b2.iloc[-1].eStart
+
+
+def _one_transcript_exons():
+    """A + strand transcript with exons 1001-1100, 2001-2100 and 3001-3100 (genePred: 0-based starts)."""
+    tx = pd.DataFrame([{
+        "name": "NM_TEST.1", "chrom": "chr1", "strand": "+", "txStart": 1000, "txEnd": 3100,
+        "cdsStart": 1000, "cdsEnd": 3100, "exonCount": 3, "exonStarts": "1000,2000,3000,",
+        "exonEnds": "1100,2100,3100,", "name2": "TEST", "exonFrames": "0,1,2,"}])
+    return build_exon_table(tx)
+
+
+@pytest.mark.parametrize("pos, ref, d_from_exon, exon", [
+    (1994, "A", 7, 2),                 # SNV before exon 2 (2001 - 1994): unchanged
+    (1200, "A" * 794, 8, 2),           # deletion of 1201-1993 in intron 1, next to exon 2 (POS alone: 100 bp past exon 1)
+    (1990, "A" * 20, 0, 2),            # deletion reaching into exon 2
+    (2150, "A" * 10, 50, 2),           # deletion after exon 2 measured from its start, as before
+])
+def test_deletion_distance_from_its_nearest_base(pos, ref, d_from_exon, exon):
+    from fastspliceai.sai10k.classify import _closest_exon
+
+    variants = pd.DataFrame([{"#CHROM": "chr1", "POS": pos, "REF": ref, "ALT": ref[0], "SYMBOL": "RefSeqTx-NM_TEST.1",
+                              "ID": "v1"}])
+    got = _closest_exon(variants, _one_transcript_exons()).iloc[0]
+
+    assert (int(got["d_from_exon"]), int(got["eNum"])) == (d_from_exon, exon)
