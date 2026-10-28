@@ -27,6 +27,13 @@ REFALT_FIELDS = ["DS_AG_REF", "DS_AG_ALT", "DS_AL_REF", "DS_AL_ALT",
 
 # a runner-up this close to the winner makes the predicted position ambiguous
 RIVAL_AMBIGUOUS = 0.8
+# a gained acceptor/donor pair is only a plausible exon within this size range
+GEX_MIN, GEX_MAX = 25, 500
+
+
+def _genomic(r, offset):
+    """Delta positions are transcript-oriented; convert to a genomic coordinate."""
+    return int(r["POS"]) + (-offset if r["strand"] == -1 else offset)
 
 
 def _outcomes(r):
@@ -41,33 +48,86 @@ def _outcomes(r):
     Shifts are measured against the native site the variant destroys, using the
     same offset convention as DP_AG/DP_AL/DP_DG/DP_DL.
     """
+    outs = []
+    # 1. the event classify() actually called, so the two can never disagree
+    primary = [
+        ("pseudoexon", r["Pseudoexon_activation"], r.get("Gained_exon_size")),
+        ("exon skipping", r["Exon_skipping"], r.get("Lost_exons_combined_size")),
+        ("intron retention", r["Intron_retention"], r.get("Retained_intron_size")),
+    ]
+    for event, fired, size in primary:
+        if fired == "YES" and pd.notna(size) and size:
+            n = int(size)
+            o = {"event": event, "bp": n, "frameshift": n % 3 != 0,
+                 "score": float(r["DS_AGDG_MAX"] if event == "pseudoexon"
+                                else r["DS_ALDL_MAX"]),
+                 "exon": int(r["eNum"])}
+            if event == "pseudoexon" and pd.notna(r.get("Pseudoexon_start")):
+                o["start"], o["end"] = int(r["Pseudoexon_start"]), int(r["Pseudoexon_end"])
+            outs.append(o)
+    for event, fired in (("acceptor shift", r["Partial_exon_deletion"]),
+                         ("acceptor shift", r["Partial_intron_retention"])):
+        if fired == "YES":
+            n = int(max(abs(r.get("bp_5prime") or 0), abs(r.get("bp_3prime") or 0)))
+            if n:
+                outs.append({"event": event, "bp": n, "frameshift": n % 3 != 0,
+                             "score": float(max(r["DS_AG"], r["DS_DG"]))})
+
+    # 2. alternatives the variant could plausibly produce instead
     cands = r.get("CANDIDATES")
     if not isinstance(cands, list) or not cands:
-        return []
+        return _dedupe(outs)
     lost = {c["kind"].split("_")[0]: c["offset"]
             for c in cands if c["kind"].endswith("_loss")}
     size = r.get("exon_size")
-    outs = []
     for c in cands:
         which, event = c["kind"].split("_")
         if event == "loss":
             if pd.isna(size):
                 continue
             n = int(size)
-            outs.append({"event": "exon skipping", "bp": n,
-                         "frameshift": n % 3 != 0, "score": c["score"]})
+            outs.append({"event": "exon skipping", "bp": n, "frameshift": n % 3 != 0,
+                         "score": c["score"], "exon": int(r["eNum"])})
         elif which in lost:
             n = abs(c["offset"] - lost[which])
             if n == 0:
                 continue
             outs.append({"event": "{} shift".format(which), "bp": n,
-                         "frameshift": n % 3 != 0, "score": c["score"]})
-    # one row per distinct consequence, strongest first
+                         "frameshift": n % 3 != 0, "score": c["score"],
+                         "exon": int(r["eNum"]), "site": which,
+                         "new_pos": _genomic(r, c["offset"])})
+    # A pseudoexon destroys nothing, so there is no loss to measure shifts
+    # against: the outcome is the exon the gained acceptor and donor bracket.
+    if not lost:
+        acc = [c for c in cands if c["kind"] == "acceptor_gain"]
+        don = [c for c in cands if c["kind"] == "donor_gain"]
+        plus = r.get("strand", 1) == 1
+        for a in acc:
+            for dn in don:
+                right_way = (a["offset"] < dn["offset"]) if plus else (a["offset"] > dn["offset"])
+                if not right_way:
+                    continue
+                n = abs(a["offset"] - dn["offset"]) + 1
+                if not (GEX_MIN <= n <= GEX_MAX):
+                    continue
+                ga, gd = _genomic(r, a["offset"]), _genomic(r, dn["offset"])
+                outs.append({"event": "pseudoexon", "bp": n,
+                             "frameshift": n % 3 != 0,
+                             "score": round(min(a["score"], dn["score"]), 3),
+                             "exon": int(r["eNum"]),
+                             "start": min(ga, gd), "end": max(ga, gd)})
+
+    return _dedupe(outs)
+
+
+def _dedupe(outs):
+    """One row per distinct consequence, strongest first."""
     seen, uniq = set(), []
     for o in sorted(outs, key=lambda o: -o["score"]):
         key = (o["event"], o["bp"])
         if key not in seen:
-            seen.add(key); uniq.append(o)
+            seen.add(key)
+            uniq.append(o)
     return uniq
 
 
@@ -416,7 +476,10 @@ def classify(variants, exons, t=None):
         outs = _outcomes(r)
         outcomes.append(outs)
         if not outs:
-            lof.append(None); summary.append(None); continue
+            lof.append(None)
+            summary.append("no outcome could be enumerated"
+                           if r["Any_splicing_aberration"] == "YES" else None)
+            continue
         bad = sum(1 for o in outs if o["frameshift"])
         lof.append("YES" if bad == len(outs) else "UNCERTAIN" if bad else "NO")
         summary.append("{}/{} outcomes frameshift".format(bad, len(outs)))

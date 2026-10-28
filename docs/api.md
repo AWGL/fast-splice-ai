@@ -62,6 +62,13 @@ their sizes and frameshift flags — plus `Consequence` (a one-line summary),
 `Event_confidence` / `Confidence_note`, and the protein prediction
 (`Protein_consequence`, `PTC_codon`, `NMD_predicted`). About 110 columns in all.
 
+The headline field is **`Predicted_LOF`** — `YES` when every plausible fate
+of the variant destroys the protein, `UNCERTAIN` when only some do, `NO`
+when none do. `LOF_note` says how many were judged, and `Predicted_outcomes`
+lists them all (event, size, score, frameshift) so you can take the maximum,
+the top one, or your own view instead. Each outcome is translated for real,
+so an in-frame one carrying a stop codon still counts as disruptive.
+
 ## score() arguments
 
 * `sai10k=False` — skip classification, return scores only

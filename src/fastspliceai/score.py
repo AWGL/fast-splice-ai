@@ -139,7 +139,7 @@ def rival_margins(y_ref, y_alt):
 
 
 # a candidate outcome must gain at least this much, and be a separate peak
-CANDIDATE_MIN_GAIN = 0.2
+CANDIDATE_MIN_GAIN = 0.1
 CANDIDATE_MAX = 6
 
 
