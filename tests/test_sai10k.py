@@ -81,3 +81,19 @@ def test_deletion_distance_from_its_nearest_base(pos, ref, d_from_exon, exon):
     got = _closest_exon(variants, _one_transcript_exons()).iloc[0]
 
     assert (int(got["d_from_exon"]), int(got["eNum"])) == (d_from_exon, exon)
+
+
+def test_partial_shift_outcomes_follow_their_own_site():
+    # a 300 bp acceptor shift out of the exon (too far for a partial intron
+    # retention) and a 10 bp donor shift into it (the partial exon deletion)
+    from fastspliceai.sai10k.classify import _outcomes
+    row = {"Pseudoexon_activation": "NO", "Exon_skipping": "NO", "Intron_retention": "NO",
+           "Partial_exon_deletion": "YES", "Partial_intron_retention": "NO",
+           "bp_5prime": -300, "bp_3prime": -10, "DS_AG": 0.2, "DS_DG": 0.7}
+    outs = _outcomes(row)
+    assert [(o["event"], o["bp"], o["frameshift"]) for o in outs] == [("donor shift", 10, True)]
+
+    # both sites shifting into the exon: two separate outcomes, each its own size
+    row.update({"bp_5prime": 6, "bp_3prime": -6})
+    outs = _outcomes(row)
+    assert sorted((o["event"], o["bp"]) for o in outs) == [("acceptor shift", 6), ("donor shift", 6)]

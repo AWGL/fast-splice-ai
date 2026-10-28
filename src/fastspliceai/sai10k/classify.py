@@ -65,13 +65,21 @@ def _outcomes(r):
             if event == "pseudoexon" and pd.notna(r.get("Pseudoexon_start")):
                 o["start"], o["end"] = int(r["Pseudoexon_start"]), int(r["Pseudoexon_end"])
             outs.append(o)
-    for event, fired in (("acceptor shift", r["Partial_exon_deletion"]),
-                         ("acceptor shift", r["Partial_intron_retention"])):
-        if fired == "YES":
-            n = int(max(abs(r.get("bp_5prime") or 0), abs(r.get("bp_3prime") or 0)))
-            if n:
-                outs.append({"event": event, "bp": n, "frameshift": n % 3 != 0,
-                             "score": float(max(r["DS_AG"], r["DS_DG"]))})
+    # a cryptic acceptor (bp_5prime) or donor (bp_3prime) shift, counted only for
+    # the event it gives: into the exon a partial exon deletion, out of it (under
+    # 251 bp) a partial intron retention - as classify() decides the two
+    for event, bp, into_exon, score in (("acceptor shift", r.get("bp_5prime"), 1, r["DS_AG"]),
+                                        ("donor shift", r.get("bp_3prime"), -1, r["DS_DG"])):
+        n = int(bp or 0)
+        if n == 0:
+            continue
+        if n * into_exon > 0:
+            fired = r["Partial_exon_deletion"] == "YES"
+        else:
+            fired = r["Partial_intron_retention"] == "YES" and abs(n) < 251
+        if fired:
+            outs.append({"event": event, "bp": abs(n), "frameshift": abs(n) % 3 != 0,
+                         "score": float(score)})
 
     # 2. alternatives the variant could plausibly produce instead
     cands = r.get("CANDIDATES")
